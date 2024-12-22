@@ -21,6 +21,7 @@ Follow the instructions. Then, install the required packages
 ```bash
 chmod +x toptagging-setup.sh
 ./toptagging-setup.sh
+mamba activate toptagging
 ```
 
 ### 1. Initialize the Calculator
