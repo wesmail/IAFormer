@@ -54,23 +54,29 @@ class ParticleGraphBuilder:
         # Extract the relevant slice of 4-vectors
         p4_chunk = self.p4[start:end]
 
-        # Compute adjacency matrix
+        # Calculate Particle Interactions
+        # Step 1: Compute pairwise deltaR using ak.combinations
         p1, p2 = ak.unzip(ak.combinations(p4_chunk, 2, axis=1))
+        # Step 2: Calculate pairwise ∆R = sqrt((Δy)^2 + (Δφ)^2)
         delta = p1.deltaR(p2)
+        # Step 3: Calculate k_T # min(p_T,a, p_T,b)
         pt_min = ak.min([p1.pt, p2.pt], axis=0)
         k_T = pt_min * delta
         pt_sum = p1.pt + p2.pt
+        # Step 4: Calculate z
         z = pt_min / pt_sum
         E_sum = p1.E + p2.E
         p_sum = p1 + p2
+        # Step 5: Calculate m^2 # m^2 = (E_sum)^2 - |p_sum|^2
         m_squared = E_sum**2 - p_sum.mag2
 
         num_particles = ak.num(p4_chunk, axis=1)
         max_particles = np.max(num_particles)
 
-        # Create a placeholder 4D matrix
+        # Create a placeholder 4D matrix (N_events, N_particles, N_particles, 4)
         adj_matrices = np.zeros((len(p4_chunk), max_particles, max_particles, 4))
 
+        # Step 6: Fill the adjacency matrices
         for i, n in enumerate(num_particles):
             triu_indices = np.triu_indices(n, k=1)
             adj_matrices[i, triu_indices[0], triu_indices[1], 0] = ak.to_numpy(delta[i])
@@ -81,7 +87,7 @@ class ParticleGraphBuilder:
             )
             adj_matrices[i, :, :, :] += adj_matrices[i, :, :, :].transpose(1, 0, 2)
 
-        # Create Lorentz array
+        # Create the 4-momentum array
         energy_padded = ak.fill_none(
             ak.pad_none(p4_chunk.energy, target=max_particles), 0
         )
@@ -99,7 +105,7 @@ class ParticleGraphBuilder:
             axis=-1,
         )
 
-        # Create mask
+        # Create the mask
         particles = ak.to_numpy(num_particles)
         row_indices = np.arange(len(particles)).reshape(-1, 1)
         column_indices = np.arange(max_particles)

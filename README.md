@@ -12,15 +12,15 @@ This Python module processes 4-momenta of jet constituents from HDF5 file to com
 
 ---
 ### 0. Download, Install Mamba, and Install Required Packages 
-Download and install Mambaforge by excuting the `installation.sh` bash script  
+Download and install Mambaforge by excuting the `download-mamba.sh` bash script  
 ```bash
-chmod +x installation.sh
+chmod +x download-mamba.sh
 ./installation.sh
 ```
 Follow the instructions. Then, install the required packages  
 ```bash
-mamba create -n toptagging numpy pandas scikit-learn matplotlib seaborn jupyter tqdm awkward vector uproot h5py -c conda-forge  
-mamba activate toptagging
+chmod +x toptagging-setup.sh
+./toptagging-setup.sh
 ```
 
 ### 1. Initialize the Calculator
