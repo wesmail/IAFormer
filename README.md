@@ -11,11 +11,25 @@ This Python module processes 4-momenta of jet constituents from HDF5 file to com
 
 
 ---
-
-## How to Use
+### 0. Download, Install Mamba, and Install Required Packages 
+Download and install Mambaforge by excuting the `installation.sh` bash script  
+```bash
+chmod +x installation.sh
+./installation.sh
+```
+Follow the instructions. Then, install the required packages  
+```bash
+mamba create -n toptagging numpy pandas scikit-learn matplotlib seaborn jupyter tqdm awkward vector uproot h5py -c conda-forge  
+mamba activate toptagging
+```
 
 ### 1. Initialize the Calculator
-Create an instance of the `ParticleGraphBuilder` class by specifying the input HDF5 file and the dataset key.
+Open Python interpreter  
+```bash
+ipython
+```
+
+Inside Python interpreter create an instance of the `ParticleGraphBuilder` class by specifying the input HDF5 file and the dataset key.
 
 ```python
 builder = ParticleGraphBuilder("val.h5", key="table")
