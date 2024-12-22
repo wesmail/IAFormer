@@ -27,6 +27,8 @@ class ParticleGraphBuilder:
         """Load data from the HDF5 file and read the 4-momentum."""
         logging.info("Loading data from HDF5 file: %s", self.file_path)
         self.df = pd.read_hdf(self.file_path, key=self.key)
+        # Shuffle the dataset
+        self.df = self.df.sample(frac=1)
 
         _px = self.df[self._col_list("PX")].values
         _py = self.df[self._col_list("PY")].values
@@ -35,6 +37,7 @@ class ParticleGraphBuilder:
 
         mask = _e > 0
         n_particles = np.sum(mask, axis=1)
+        self.max_particles = np.max(n_particles)
 
         # Unflatten the valid arrays using the particle counts
         self.px = ak.unflatten(_px[mask], n_particles)
@@ -71,10 +74,11 @@ class ParticleGraphBuilder:
         m_squared = E_sum**2 - p_sum.mag2
 
         num_particles = ak.num(p4_chunk, axis=1)
-        max_particles = np.max(num_particles)
 
         # Create a placeholder 4D matrix (N_events, N_particles, N_particles, 4)
-        adj_matrices = np.zeros((len(p4_chunk), max_particles, max_particles, 4))
+        adj_matrices = np.zeros(
+            (len(p4_chunk), self.max_particles, self.max_particles, 4)
+        )
 
         # Step 6: Fill the adjacency matrices
         for i, n in enumerate(num_particles):
@@ -89,11 +93,11 @@ class ParticleGraphBuilder:
 
         # Create the 4-momentum array
         energy_padded = ak.fill_none(
-            ak.pad_none(p4_chunk.energy, target=max_particles), 0
+            ak.pad_none(p4_chunk.energy, target=self.max_particles), 0
         )
-        px_padded = ak.fill_none(ak.pad_none(p4_chunk.px, target=max_particles), 0)
-        py_padded = ak.fill_none(ak.pad_none(p4_chunk.py, target=max_particles), 0)
-        pz_padded = ak.fill_none(ak.pad_none(p4_chunk.pz, target=max_particles), 0)
+        px_padded = ak.fill_none(ak.pad_none(p4_chunk.px, target=self.max_particles), 0)
+        py_padded = ak.fill_none(ak.pad_none(p4_chunk.py, target=self.max_particles), 0)
+        pz_padded = ak.fill_none(ak.pad_none(p4_chunk.pz, target=self.max_particles), 0)
 
         p4 = np.stack(
             [
@@ -108,7 +112,7 @@ class ParticleGraphBuilder:
         # Create the mask
         particles = ak.to_numpy(num_particles)
         row_indices = np.arange(len(particles)).reshape(-1, 1)
-        column_indices = np.arange(max_particles)
+        column_indices = np.arange(self.max_particles)
         mask = column_indices < particles[row_indices]
 
         # Extract labels
@@ -116,7 +120,7 @@ class ParticleGraphBuilder:
 
         return p4, adj_matrices, mask, labels
 
-    def save_to_hdf5(self, output_file, chunk_size=100):
+    def save_to_hdf5(self, output_file, chunk_size=100, max_num_chunks=-1):
         """Save feature matrix, edge feature matrix, mask, and labels to an HDF5 file in chunks."""
         logging.info("Saving data to HDF5 file: %s", output_file)
 
@@ -127,6 +131,8 @@ class ParticleGraphBuilder:
             label_dset = None
 
             num_rows = len(self.p4)
+            if max_num_chunks != -1 or max_num_chunks < num_rows // chunk_size:
+                num_rows = int(max_num_chunks * chunk_size)
             for start in range(0, num_rows, chunk_size):
                 end = min(start + chunk_size, num_rows)
                 lorentz_array, adj_matrices, mask, labels = self.process_chunk(

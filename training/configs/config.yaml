@@ -1,0 +1,7 @@
+seed_everything: 42
+trainer:
+  max_epochs: 1
+  accelerator: "gpu"
+  devices: [0]
+  #strategy: "ddp_find_unused_parameters_true"
+  precision: "32-true"  # single-precision training
