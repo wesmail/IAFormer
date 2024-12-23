@@ -24,7 +24,7 @@ chmod +x toptagging-setup.sh
 mamba activate toptagging
 ```
 
-### 1. Initialize the Calculator
+### 1. Initialize the Builder
 Open Python interpreter  
 ```bash
 ipython
@@ -83,3 +83,11 @@ The output HDF5 file contains the following datasets:
 2. `adj_matrices`: A 4D array of shape `(N_events, max_particles, max_particles, 4)` containing pairwise interaction features `(ΔR, kT, z, m²)`.  
 3. `mask`: A 2D boolean array of shape `(N_events, max_particles)` indicating valid particle entries.  
 4. `labels`: A 1D array of shape `(N_events,)` containing labels for the events.
+
+# Training
+After creating the graph files in a form of `h5` files for training, validation and testing, you are ready to train the model.  
+The first step is to modify the configuration file `configs/config.yaml` according to your needs, e.g., number of epochs, model size, ...  
+Then simply run
+```python
+ipython main.py -- fit --config=configs/config.yaml
+```

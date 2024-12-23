@@ -1,7 +1,44 @@
 seed_everything: 42
 trainer:
   max_epochs: 1
-  accelerator: "gpu"
-  devices: [0]
+  accelerator: "cpu"
+  devices: 1
   #strategy: "ddp_find_unused_parameters_true"
   precision: "32-true"  # single-precision training
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        save_weights_only: false
+        mode: "min"
+        monitor: "val_loss"
+        every_n_train_steps: 0
+        every_n_epochs: 1
+        train_time_interval: null
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: "val_loss"
+        min_delta: 0.0
+        patience: 3
+        verbose: false
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args:
+        save_dir: "."
+        name: "toptagging_checkpoints"
+
+model:
+  class_path: models.models.JetTaggingModule
+  init_args:
+    in_channels: 4
+    out_channels_n: 16
+    out_channels_E: 16
+    knn: 4
+    lr_step: 5
+    lr_gamma: 0.9
+
+data:
+  class_path: data.data_handling.JetTaggingDataModule
+  init_args:
+    file_list: ["train.h5", "val.h5", "test.h5"]
+    batch_size: 32
+    num_workers: 16        

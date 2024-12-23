@@ -50,21 +50,87 @@ class H5Dataset(Dataset):
 
 
 class JetTaggingDataModule(LightningDataModule):
+    """
+    PyTorch Lightning DataModule for managing training, validation, and test datasets
+    for jet tagging stored in HDF5 files.
+
+    Args:
+        file_list (list): List containing paths to the HDF5 files for training, validation, and testing.
+        batch_size (int): Batch size for data loaders.
+        num_workers (int): Number of workers for data loaders.
+    """
+
     def __init__(
         self,
-        data_dir: str = "",
+        file_list: list,
+        batch_size: int = 32,
+        num_workers: int = 8,
     ) -> None:
         super().__init__()
+
+        if len(file_list) != 3:
+            raise ValueError(
+                "file_list must contain exactly three file paths: [train_file, val_file, test_file]"
+            )
+
+        self.train_file, self.val_file, self.test_file = file_list
+
+        self.batch_size = batch_size
+        self.num_workers = num_workers
 
         # Automatically save all parameters
         self.save_hyperparameters()
 
-    def __len__(self) -> int:
-        # Return the number of graphs in the dataset
-        pass
-
-    def __getitem__(self, item) -> dict:
-        return dict()
-
     def setup(self, stage: str) -> None:
-        pass
+        """
+        Set up datasets for training, validation, and testing based on the provided stage.
+
+        Args:
+            stage (str): One of 'fit', 'validate', 'test', or 'predict'.
+        """
+        self.train_dataset = H5Dataset(data_dir=self.train_datadir)
+        self.val_dataset = H5Dataset(data_dir=self.val_datadir)
+        self.test_dataset = H5Dataset(data_dir=self.test_datadir)
+
+    def train_dataloader(self) -> DataLoader:
+        """
+        Return the DataLoader for the training dataset.
+
+        Returns:
+            DataLoader: PyTorch DataLoader for training.
+        """
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=True,
+        )
+
+    def val_dataloader(self) -> DataLoader:
+        """
+        Return the DataLoader for the validation dataset.
+
+        Returns:
+            DataLoader: PyTorch DataLoader for validation.
+        """
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False,
+        )
+
+    def test_dataloader(self) -> DataLoader:
+        """
+        Return the DataLoader for the test dataset.
+
+        Returns:
+            DataLoader: PyTorch DataLoader for testing.
+        """
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False,
+            drop_last=True,
+        )
