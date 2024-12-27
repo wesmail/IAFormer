@@ -159,13 +159,13 @@ class JetTaggingModule(LightningModule):
         Returns:
             STEP_OUTPUT: The training loss.
         """
-        # node_features, edge_features, masks, labels = (
-        #    batch["node_features"],
-        #    batch["edge_features"],
-        #    batch["mask"],
-        #    batch["labels"],
-        # )
-        # model_out = self.model()
+        node_features, edge_features, masks, labels = (
+            batch["node_features"],
+            batch["edge_features"],
+            batch["mask"],
+            batch["labels"],
+        )
+        model_out = self.model()
         # calculate the loss
         loss = 0  # torch.nn.functional.binary_cross_entropy(model_out, labels)
         # acc  = self.accuracy(model_out, labels)

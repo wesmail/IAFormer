@@ -62,6 +62,7 @@ class JetTaggingDataModule(LightningDataModule):
 
     def __init__(
         self,
+        data_dir: str,
         file_list: list,
         batch_size: int = 32,
         num_workers: int = 8,
@@ -74,7 +75,7 @@ class JetTaggingDataModule(LightningDataModule):
             )
 
         self.train_file, self.val_file, self.test_file = file_list
-
+        self.data_dir = data_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
 
@@ -88,9 +89,9 @@ class JetTaggingDataModule(LightningDataModule):
         Args:
             stage (str): One of 'fit', 'validate', 'test', or 'predict'.
         """
-        self.train_dataset = H5Dataset(data_dir=self.train_datadir)
-        self.val_dataset = H5Dataset(data_dir=self.val_datadir)
-        self.test_dataset = H5Dataset(data_dir=self.test_datadir)
+        self.train_dataset = H5Dataset(data_dir=self.data_dir + self.train_file)
+        self.val_dataset = H5Dataset(data_dir=self.data_dir + self.val_file)
+        self.test_dataset = H5Dataset(data_dir=self.data_dir + self.test_file)
 
     def train_dataloader(self) -> DataLoader:
         """

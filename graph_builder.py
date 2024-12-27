@@ -14,14 +14,14 @@ class ParticleGraphBuilder:
     def __init__(self, file_path, key="table", max_particles=200):
         self.file_path = file_path
         self.key = key
-        self.max_particles = max_particles
+        self._max_particles = max_particles
         logging.info(
             "Initialized ParticleInteractionCalculator with file: %s", file_path
         )
 
     def _col_list(self, prefix):
         """Generate column names for a given prefix."""
-        return [f"{prefix}_{i}" for i in range(self.max_particles)]
+        return [f"{prefix}_{i}" for i in range(self._max_particles)]
 
     def load_data(self):
         """Load data from the HDF5 file and read the 4-momentum."""
@@ -38,6 +38,8 @@ class ParticleGraphBuilder:
         mask = _e > 0
         n_particles = np.sum(mask, axis=1)
         self.max_particles = np.max(n_particles)
+        if self._max_particles < self.max_particles:
+            self.max_particles = self._max_particles
 
         # Unflatten the valid arrays using the particle counts
         self.px = ak.unflatten(_px[mask], n_particles)
@@ -99,15 +101,84 @@ class ParticleGraphBuilder:
         py_padded = ak.fill_none(ak.pad_none(p4_chunk.py, target=self.max_particles), 0)
         pz_padded = ak.fill_none(ak.pad_none(p4_chunk.pz, target=self.max_particles), 0)
 
-        p4 = np.stack(
+        # Calculate jet-level properties
+        jet_p4 = ak.sum(p4_chunk, axis=1)
+        jet_pt = jet_p4.pt
+        jet_eta = jet_p4.eta
+        jet_phi = jet_p4.phi
+        jet_energy = jet_p4.energy
+
+        # Particle-level properties
+        particle_pt = p4_chunk.pt
+        particle_eta = p4_chunk.eta
+        particle_phi = p4_chunk.phi
+        particle_energy = p4_chunk.energy
+
+        # Calculate Δη and Δφ
+        delta_eta = particle_eta - jet_eta
+        delta_phi = particle_phi - jet_phi
+
+        # Calculate log(pT), log(E)
+        log_pt = np.log(particle_pt)
+        log_energy = np.log(particle_energy)
+
+        # Calculate log(pT/pT_jet) and log(E/E_jet)
+        pt_rel = particle_pt / jet_pt
+        log_pt_rel = np.log(pt_rel)
+        energy_rel = particle_energy / jet_energy
+        log_energy_rel = np.log(energy_rel)
+
+        # Calculate ΔR
+        delta_r = np.hypot(delta_eta, delta_phi)
+
+        # Pad kinematic variables
+        log_pt_padded = ak.fill_none(ak.pad_none(log_pt, target=self.max_particles), 0)
+        log_energy_padded = ak.fill_none(
+            ak.pad_none(log_energy, target=self.max_particles), 0
+        )
+        log_pt_rel_padded = ak.fill_none(
+            ak.pad_none(log_pt_rel, target=self.max_particles), 0
+        )
+        log_energy_rel_padded = ak.fill_none(
+            ak.pad_none(log_energy_rel, target=self.max_particles), 0
+        )
+        delta_eta_padded = ak.fill_none(
+            ak.pad_none(delta_eta, target=self.max_particles), 0
+        )
+        delta_phi_padded = ak.fill_none(
+            ak.pad_none(delta_phi, target=self.max_particles), 0
+        )
+        delta_r_padded = ak.fill_none(
+            ak.pad_none(delta_r, target=self.max_particles), 0
+        )
+
+        # Stack all features into a single array
+        feature_matrix = np.stack(
             [
                 ak.to_numpy(energy_padded),
                 ak.to_numpy(px_padded),
                 ak.to_numpy(py_padded),
                 ak.to_numpy(pz_padded),
+                ak.to_numpy(log_pt_padded),
+                ak.to_numpy(log_energy_padded),
+                ak.to_numpy(log_pt_rel_padded),
+                ak.to_numpy(log_energy_rel_padded),
+                ak.to_numpy(delta_eta_padded),
+                ak.to_numpy(delta_phi_padded),
+                ak.to_numpy(delta_r_padded),
             ],
             axis=-1,
         )
+
+        # p4 = np.stack(
+        #    [
+        #        ak.to_numpy(energy_padded),
+        #        ak.to_numpy(px_padded),
+        #        ak.to_numpy(py_padded),
+        #        ak.to_numpy(pz_padded),
+        #    ],
+        #    axis=-1,
+        # )
 
         # Create the mask
         particles = ak.to_numpy(num_particles)
@@ -118,7 +189,7 @@ class ParticleGraphBuilder:
         # Extract labels
         labels = self.df["is_signal_new"].iloc[start:end].values
 
-        return p4, adj_matrices, mask, labels
+        return feature_matrix, adj_matrices, mask, labels
 
     def save_to_hdf5(self, output_file, chunk_size=100, max_num_chunks=-1):
         """Save feature matrix, edge feature matrix, mask, and labels to an HDF5 file in chunks."""
@@ -135,17 +206,15 @@ class ParticleGraphBuilder:
                 num_rows = int(max_num_chunks * chunk_size)
             for start in range(0, num_rows, chunk_size):
                 end = min(start + chunk_size, num_rows)
-                lorentz_array, adj_matrices, mask, labels = self.process_chunk(
-                    start, end
-                )
+                features, adj_matrices, mask, labels = self.process_chunk(start, end)
 
                 if lorentz_dset is None:
                     lorentz_dset = h5f.create_dataset(
                         "feature_matrices",
-                        data=lorentz_array,
-                        maxshape=(None, *lorentz_array.shape[1:]),
+                        data=features,
+                        maxshape=(None, *features.shape[1:]),
                         chunks=True,
-                        dtype=lorentz_array.dtype,
+                        dtype=features.dtype,
                     )
                     adj_dset = h5f.create_dataset(
                         "adj_matrices",
@@ -170,9 +239,9 @@ class ParticleGraphBuilder:
                     )
                 else:
                     lorentz_dset.resize(
-                        lorentz_dset.shape[0] + lorentz_array.shape[0], axis=0
+                        lorentz_dset.shape[0] + features.shape[0], axis=0
                     )
-                    lorentz_dset[-lorentz_array.shape[0] :] = lorentz_array
+                    lorentz_dset[-features.shape[0] :] = features
 
                     adj_dset.resize(adj_dset.shape[0] + adj_matrices.shape[0], axis=0)
                     adj_dset[-adj_matrices.shape[0] :] = adj_matrices
