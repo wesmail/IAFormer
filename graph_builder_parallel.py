@@ -4,6 +4,7 @@ import awkward as ak
 import vector
 import h5py
 import logging
+from joblib import Parallel, delayed
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -191,24 +192,30 @@ class ParticleGraphBuilder:
 
         return feature_matrix.astype(np.float32), adj_matrices.astype(np.float32), mask.astype(np.int16), labels.astype(np.int16)
 
-    def save_to_hdf5(self, output_file, chunk_size=100, max_num_chunks=-1):
+    def save_to_hdf5(self, output_file, chunk_size=100, max_num_chunks=-1, n_jobs=4):
         """Save feature matrix, edge feature matrix, mask, and labels to an HDF5 file in chunks."""
         logging.info("Saving data to HDF5 file: %s", output_file)
 
         with h5py.File(output_file, "w") as h5f:
-            lorentz_dset = None
-            adj_dset = None
-            mask_dset = None
-            label_dset = None
+            lorentz_dset, adj_dset, mask_dset, label_dset = None, None, None, None
 
             num_rows = len(self.p4)
-            if max_num_chunks != -1 or max_num_chunks < num_rows // chunk_size:
+            if max_num_chunks != -1 and max_num_chunks < num_rows // chunk_size:
                 num_rows = int(max_num_chunks * chunk_size)
-                
-            for start in range(0, num_rows, chunk_size):
-                end = min(start + chunk_size, num_rows)
-                features, adj_matrices, mask, labels = self.process_chunk(start, end)
 
+            # Create list of chunk ranges
+            chunk_ranges = [
+                (start, min(start + chunk_size, num_rows))
+                for start in range(0, num_rows, chunk_size)
+            ]
+
+            # Process chunks in parallel using joblib
+            results = Parallel(n_jobs=n_jobs)(
+                delayed(self.process_chunk)(start, end) for start, end in chunk_ranges
+            )
+
+            # Collect and save results
+            for features, adj_matrices, mask, labels in results:
                 if lorentz_dset is None:
                     lorentz_dset = h5f.create_dataset(
                         "feature_matrices",
@@ -217,7 +224,6 @@ class ParticleGraphBuilder:
                         chunks=True,
                         dtype=features.dtype,
                     )
-               
                     adj_dset = h5f.create_dataset(
                         "adj_matrices",
                         data=adj_matrices,
@@ -240,19 +246,17 @@ class ParticleGraphBuilder:
                         dtype=labels.dtype,
                     )
                 else:
-                    lorentz_dset.resize(
-                        lorentz_dset.shape[0] + features.shape[0], axis=0
-                    )
-                    lorentz_dset[-features.shape[0] :] = features
+                    lorentz_dset.resize(lorentz_dset.shape[0] + features.shape[0], axis=0)
+                    lorentz_dset[-features.shape[0]:] = features
 
                     adj_dset.resize(adj_dset.shape[0] + adj_matrices.shape[0], axis=0)
-                    adj_dset[-adj_matrices.shape[0] :] = adj_matrices
+                    adj_dset[-adj_matrices.shape[0]:] = adj_matrices
 
                     mask_dset.resize(mask_dset.shape[0] + mask.shape[0], axis=0)
-                    mask_dset[-mask.shape[0] :] = mask
+                    mask_dset[-mask.shape[0]:] = mask
 
                     label_dset.resize(label_dset.shape[0] + labels.shape[0], axis=0)
-                    label_dset[-labels.shape[0] :] = labels
+                    label_dset[-labels.shape[0]:] = labels
 
         logging.info("Data successfully saved to %s", output_file)
 
@@ -260,4 +264,4 @@ class ParticleGraphBuilder:
 # Example usage:
 # builder = ParticleGraphBuilder("val.h5")
 # builder.load_data()
-# builder.save_to_hdf5("output.h5", chunk_size=5000)
+# builder.save_to_hdf5("output.h5", chunk_size=5000, max_num_chunks=-1, n_jobs=16)
