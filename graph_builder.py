@@ -189,7 +189,7 @@ class ParticleGraphBuilder:
         # Extract labels
         labels = self.df["is_signal_new"].iloc[start:end].values
 
-        return feature_matrix, adj_matrices, mask, labels
+        return feature_matrix.astype(np.float32), adj_matrices.astype(np.float32), mask.astype(np.int16), labels.astype(np.int16)
 
     def save_to_hdf5(self, output_file, chunk_size=100, max_num_chunks=-1):
         """Save feature matrix, edge feature matrix, mask, and labels to an HDF5 file in chunks."""
