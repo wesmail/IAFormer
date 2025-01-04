@@ -1,10 +1,11 @@
 # Generic imports
+import math
 import h5py
 import numpy as np
 
 # Torch imports
 import torch
-from torch.utils.data import Dataset, random_split, DataLoader
+from torch.utils.data import Dataset, DataLoader
 
 # PyTorch Lightning
 import lightning as L
@@ -24,14 +25,20 @@ class H5Dataset(Dataset):
         self.file = h5py.File(data_dir, "r")
 
         self.features = self.file["feature_matrices"]
-        self.adj_matrices = self.file["adj_matrices"]
+        self.sparse_adj_matrix = self.file["adj_matrices"]
         self.mask = self.file["mask"]
         self.labels = self.file["labels"]
 
     def __getitem__(self, item) -> dict:
+        node_features = torch.tensor(self.features[item], dtype=torch.float32)
+        self.max_num_particles = node_features.shape[0]
+
+        # Reconstruct the full adj matrix
+        self.reconstruct_adjacency(self.sparse_adj_matrix[item])
+
         return {
-            "node_features": torch.tensor(self.features[item], dtype=torch.float32),
-            "edge_features": torch.tensor(self.adj_matrices[item], dtype=torch.float32),
+            "node_features": node_features,
+            "edge_features": torch.tensor(self.adj_matrix, dtype=torch.float32),
             "mask": torch.tensor(self.mask[item], dtype=torch.float32),
             "labels": torch.tensor(self.labels[item], dtype=torch.float32),
         }
@@ -41,6 +48,34 @@ class H5Dataset(Dataset):
         Total number of samples in the dataset.
         """
         return len(self.labels)
+
+    def infer_num_particles_from_pairs(self, pairs) -> int:
+        # Solve n * (n - 1) / 2 = pairs
+        discriminant = 1 + 8 * pairs
+        n = int((-1 + math.sqrt(discriminant)) / 2)
+
+        return n + 1
+
+    def reconstruct_adjacency(self, flat_adj_matrix):
+        # Initialize an empty adjacency matrix
+        self.adj_matrix = np.zeros(
+            (self.max_num_particles, self.max_num_particles, flat_adj_matrix.shape[1])
+        )
+
+        # Extract the non-padded values for the current feature
+        valid_values = flat_adj_matrix[np.where(flat_adj_matrix[:, 0] != -1.0)[0], :]
+        num_particles = self.infer_num_particles_from_pairs(valid_values.shape[0])
+
+        # Get the upper triangle indices
+        triu_indices = np.triu_indices(num_particles, k=1)
+        for feature in range(valid_values.shape[1]):
+            self.adj_matrix[triu_indices[0], triu_indices[1], feature] = valid_values[
+                :, feature
+            ]
+
+        self.adj_matrix[:, :, :] += self.adj_matrix[:, :, :].transpose(
+            1, 0, 2
+        )  # Symmetrize
 
     def close(self):
         """
