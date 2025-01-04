@@ -270,51 +270,48 @@ class ParticleGraphBuilder:
 
 
 class SparseParticleGraphBuilder:
-    def __init__(self, file_path, key="table", max_particles=200):
+    def __init__(
+        self,
+        file_path: str,
+        key: str = "table",
+        max_particles: int = 200,
+        chunk_size: int = 1000,
+        max_num_chunks: int = -1,
+    ):
         self.file_path = file_path
         self.key = key
-        self._max_particles = max_particles
+        self.max_particles = max_particles
+        self.chunk_size = chunk_size
+        self.max_num_chunks = max_num_chunks
         logging.info("Initialized ParticleGraphBuilder with file: %s", file_path)
 
     def _col_list(self, prefix):
         """Generate column names for a given prefix."""
-        return [f"{prefix}_{i}" for i in range(self._max_particles)]
-
-    def load_data(self):
-        """Load data from the HDF5 file and read the 4-momentum."""
-        logging.info("Loading data from HDF5 file: %s", self.file_path)
-        self.df = pd.read_hdf(self.file_path, key=self.key)
-        # Shuffle the dataset
-        self.df = self.df.sample(frac=1)
-
-        _px = self.df[self._col_list("PX")].values
-        _py = self.df[self._col_list("PY")].values
-        _pz = self.df[self._col_list("PZ")].values
-        _e = self.df[self._col_list("E")].values
-
-        mask = _e > 0
-        n_particles = np.sum(mask, axis=1)
-        self.max_particles = np.max(n_particles)
-        if self._max_particles < self.max_particles:
-            self.max_particles = self._max_particles
-
-        # Unflatten the valid arrays using the particle counts
-        self.px = ak.unflatten(_px[mask], n_particles)
-        self.py = ak.unflatten(_py[mask], n_particles)
-        self.pz = ak.unflatten(_pz[mask], n_particles)
-        self.e = ak.unflatten(_e[mask], n_particles)
-
-        # Create the 4-vectors
-        self.p4 = vector.zip(
-            {"px": self.px, "py": self.py, "pz": self.pz, "energy": self.e}
-        )
+        return [f"{prefix}_{i}" for i in range(self.max_particles)]
 
     def process_chunk(self, start, end):
         """Process a range of data to compute the 4-vectors, adjacency matrix, mask, and labels."""
         logging.info("Processing chunk from row %d to row %d", start, end)
 
-        # Extract the relevant slice of 4-vectors
-        p4_chunk = self.p4[start:end]
+        df_chunk = pd.read_hdf(self.file_path, key=self.key, start=start, stop=end)
+
+        # Process columns for the current chunk
+        _px = df_chunk[self._col_list("PX")].values
+        _py = df_chunk[self._col_list("PY")].values
+        _pz = df_chunk[self._col_list("PZ")].values
+        _e = df_chunk[self._col_list("E")].values
+
+        mask = _e > 0
+        n_particles = np.sum(mask, axis=1)
+        max_particles_chunk = np.max(n_particles)
+        max_particles = min(self.max_particles, max_particles_chunk)
+
+        px = ak.unflatten(_px[mask], n_particles)
+        py = ak.unflatten(_py[mask], n_particles)
+        pz = ak.unflatten(_pz[mask], n_particles)
+        e = ak.unflatten(_e[mask], n_particles)
+
+        p4_chunk = vector.zip({"px": px, "py": py, "pz": pz, "energy": e})
 
         # Calculate Particle Interactions
         # Step 1: Compute pairwise deltaR using ak.combinations
@@ -443,7 +440,7 @@ class SparseParticleGraphBuilder:
         mask = column_indices < particles[row_indices]
 
         # Extract labels
-        labels = self.df["is_signal_new"].iloc[start:end].values
+        labels = df_chunk["is_signal_new"].values
 
         return (
             feature_matrix.astype(np.float32),
@@ -452,21 +449,28 @@ class SparseParticleGraphBuilder:
             labels.astype(np.int16),
         )
 
-    def save_to_hdf5(self, output_file, chunk_size=100, max_num_chunks=-1, n_jobs=4):
-        """Save feature matrix, edge feature matrix, mask, and labels to an HDF5 file in chunks."""
-        logging.info("Saving data to HDF5 file: %s", output_file)
+    def generate_graphs(self, output_file="output.h5", n_jobs=1):
+        """Load data from the HDF5 file and read the 4-momentum.
+        Then generate node and edge features and store them in
+        an output HDF5 file"""
+        logging.info("Loading data from HDF5 file: %s", self.file_path)
 
         with h5py.File(output_file, "w") as h5f:
             lorentz_dset, adj_dset, mask_dset, label_dset = None, None, None, None
 
-            num_rows = len(self.p4)
-            if max_num_chunks != -1 and max_num_chunks < num_rows // chunk_size:
-                num_rows = int(max_num_chunks * chunk_size)
+            with pd.HDFStore(self.file_path, mode="r") as store:
+                total_rows = store.get_storer(self.key).nrows
+
+            if (
+                self.max_num_chunks != -1
+                and self.max_num_chunks < total_rows // self.chunk_size
+            ):
+                total_rows = int(self.max_num_chunks * self.chunk_size)
 
             # Create list of chunk ranges
             chunk_ranges = [
-                (start, min(start + chunk_size, num_rows))
-                for start in range(0, num_rows, chunk_size)
+                (start, min(start + self.chunk_size, total_rows))
+                for start in range(0, total_rows, self.chunk_size)
             ]
 
             # Process chunks in parallel using joblib
@@ -527,3 +531,7 @@ class SparseParticleGraphBuilder:
 # builder = ParticleGraphBuilder("val.h5")
 # builder.load_data()
 # builder.save_to_hdf5("output.h5", chunk_size=5000, max_num_chunks=-1, n_jobs=16)
+
+# Alternative use
+# builder = SparseParticleGraphBuilder(file_path="val.h5", key="table", max_particles=100, chunk_size=1000, max_num_chunks=-1)
+# builder.generate_graphs(output_file="val-graphs.h5", n_jobs=16)
