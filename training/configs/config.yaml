@@ -1,8 +1,8 @@
 seed_everything: 42
 trainer:
   max_epochs: 1
-  accelerator: "cpu"
-  devices: 1
+  accelerator: "gpu"
+  devices: [0]
   #strategy: "ddp_find_unused_parameters_true"
   precision: "32-true"  # single-precision training
   callbacks:
@@ -29,16 +29,27 @@ trainer:
 model:
   class_path: models.models.JetTaggingModule
   init_args:
-    in_channels: 4
-    out_channels_n: 16
-    out_channels_E: 16
-    knn: 4
+    D: 11 # number of node features
+    N: 100 # number of the particles in the event
+    f: 4   # number of edge features
+    n_Transformer: 8 # Number of Transformer layers
+    n_GNN: 3
+    k: 7 
+    expansion_factor: 4 # Expansion factor of the internal MLP in the Transformer layers
+    n_heads: 15  # Number of attention heads
+    masked: True # If mask is used
+    pooling: 'avg' #pooling type, max, avg or sum
+    embed_dim: [256,128,64] # input embedding layers 
+    h_dim: 64 # hidden dim of the scaling matrices
+    U_dim: [512,256,128,64] # Embedding layers of the edge matrix
+    mlp_f_dim: [512,128,64] # layers of the final MLP
     lr_step: 5
     lr_gamma: 0.9
 
 data:
   class_path: data.data_handling.JetTaggingDataModule
   init_args:
-    file_list: ["train.h5", "val.h5", "test.h5"]
-    batch_size: 32
+    data_dir: "/mnt/d/waleed/CP-Higgs/GraphTransformer/GraphTransformer/"
+    file_list: ["train.h5", "val.h5", "val.h5"]
+    batch_size: 128
     num_workers: 16        

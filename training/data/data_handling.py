@@ -139,6 +139,7 @@ class JetTaggingDataModule(LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            drop_last=True,
             shuffle=True,
         )
 
@@ -153,6 +154,7 @@ class JetTaggingDataModule(LightningDataModule):
             self.val_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            drop_last=True,
             shuffle=False,
         )
 

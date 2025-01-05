@@ -10,99 +10,119 @@ from lightning.pytorch.utilities.types import STEP_OUTPUT
 # Torch Metrics imports
 from torchmetrics import Accuracy
 
-
-######### Edge Update ####################
-class Edgeupdate(nn.Module):
-    def __init__(self, hidden_dim, dim_e, dropout_ratio=0.2):
-        super(Edgeupdate, self).__init__()
-        self.hidden_dim = hidden_dim
-        self.dim_e = dim_e
-        self.dropout = dropout_ratio
-        self.W = nn.Linear(self.hidden_dim * 2 + self.dim_e, self.dim_e)
-
-    def forward(self, edge, node1, node2):
-        """
-        :param edge: [batch, node, node, dim_e]
-        :param node: [batch, node, node, dim]
-        :return:
-        """
-
-        node = torch.cat([node1, node2], dim=-1)  # [batch, node, node, dim * 2]
-        edge = self.W(torch.cat([edge, node], dim=-1))
-        return edge  # [batch, node,npde, dim_e]
+# Framework imports
+from models.transformer import mlp, Embedding, TransformerEncoder
+from models.gnn import EEDGCNEncoder
 
 
-class EdgeConvWithEdgeFeatures(nn.Module):
-    def __init__(self, in_channels, out_channels_n, out_channels_E, k, pooling="avg"):
-        super(EdgeConvWithEdgeFeatures, self).__init__()
-        self.k = k
-        self.pooling = pooling
-        self.in_channels = in_channels
-        self.out_channels_n = out_channels_n
-        self.out_channels_E = out_channels_E
-        self.W = nn.Linear(self.in_channels, self.out_channels_E)
-        self.highway = Edgeupdate(
-            self.in_channels, self.out_channels_E, dropout_ratio=0.2
-        )
-        self.mlp = nn.Sequential(
-            nn.Linear(2 * self.in_channels, self.out_channels_n, bias=False),
-            nn.BatchNorm1d(self.out_channels_n),
-            nn.ReLU(),
-        )
+class IAFormer(nn.Module):
+    def __init__(
+        self,
+        f_dim,
+        n_particles,
+        U_features,
+        k=7,
+        n_Transformer=2,
+        n_GNNLayers=4,
+        h_dim=200,
+        expansion_factor=4,
+        n_heads=10,
+        masked=True,
+        pooling="avg",
+        embed_dim=[128, 512, 128],
+        U_dim=[128, 64, 64, 10],
+        mlp_f_dim=[128, 64],
+    ):
+        super(IAFormer, self).__init__()
 
-    def forward(self, x, weight_adj):
         """
         Args:
-            x: Input point cloud data, shape [B, N, D]
-            B - batch size, N - number of points, D - feature dimensions
-            edge_features: Input edge features, shape [B, N, k, E]
-            E - edge feature dimensions
-        Returns:
-            x_out: Updated features after EdgeConv, shape [B, N, out_channels]
+           f_dim: int, number  of the feature tokens
+           n_particles: int, number  of the particle tokens
+           U_features: int, number of the featires in the pairwise interaction matrix
+           n_Transformer: int, number of Transformer layers
+           h_dim: int, hidden dim of the Q,K and V
+           expansion_factor: int, expansion of the size of the internal MLP layers in the Transformer layers.
+           n_heads: int, number of attention heads
+           masked: boolean, to use the attention mask
+           Pooling: str, define the pooling kind, avg, max and sum
+           embed_dim: list, define the number of neurons in the MLP for features embedding
+           U_dim: list, define the number of neuron in the MLP for pairwise interaction embedding.
+                                                                      The last number must equals the number of attention heads
+           mlp_f_dim: list, define the number of neurons in the final MLP   
+         
+        return:
+                transformer netwirk with pairwise interaction matrix included.
         """
-        B, N, D = x.size()
-        _, _, _, E = weight_adj.size()
+        self.f_dim = f_dim
+        self.n_particles = n_particles
+        self.U_features = U_features
+        self.k = k
+        self.n_Transformer = n_Transformer
+        self.n_GNNLayers = n_GNNLayers
+        self.n_heads = n_heads
+        self.masked = masked
+        self.expansion_factor = expansion_factor
+        self.h_dim = h_dim
+        self.pooling = pooling
+        self.embed_dim = embed_dim
+        self.mlp_f_dim = mlp_f_dim
+        self.U_dim = U_dim
+        self.mlp = mlp(self.n_particles, self.mlp_f_dim)
+        self.U_embeding = Embedding(self.U_features, self.U_dim)
+        self.embed = Embedding(self.f_dim, self.embed_dim)
+        self.encoder = TransformerEncoder(
+            self.f_dim,
+            embed_dim=self.embed_dim,
+            h_dim=self.h_dim,
+            num_layers=self.n_Transformer,
+            expansion_factor=self.expansion_factor,
+            n_heads=self.n_heads,
+            masked=self.masked,
+        )
+        self.GNNencoder = EEDGCNEncoder(
+            self.embed_dim[-1],
+            self.embed_dim[-1],
+            self.U_dim[-1],
+            self.U_dim[-1],
+            self.k,
+            self.n_GNNLayers,
+            self.pooling,
+        )
+        self.nW = nn.Linear(self.U_dim[-1], self.n_heads)
+        self.nH = nn.LayerNorm(self.f_dim)
+        self.nE = nn.LayerNorm(self.U_features)
 
-        # Step 1: Compute pairwise distance and get k-nearest neighbors
-        pairwise_dist = torch.cdist(x, x, p=2)  # [B, N, N]
-        idx = pairwise_dist.topk(k=self.k, dim=-1, largest=False)[1]  # [B, N, k]
+    def forward(self, input_T, input_E):
+        """
+        input_T: dim (batch, particle tokens, feature tokens)
+        input_E: dim (batch, particle tokens, particle tokens, pairwise features)
+        """
+        inp_E = self.U_embeding(input_E)
+        inp_T = self.embed(input_T)
+        out_H, out_E = self.GNNencoder(inp_T, inp_E)
 
-        # Step 2: Gather neighbor features
-        neighbors = torch.gather(
-            x.unsqueeze(2).expand(-1, -1, N, -1),
-            2,
-            idx.unsqueeze(-1).expand(-1, -1, -1, D),
-        )  # [B, N, k, D]
+        inp_E_T = torch.permute(self.nW(out_E), (0, -1, 1, 2))
 
-        # Central point repeated for k neighbors: [B, N, k, D]
-        central = x.unsqueeze(2).expand(-1, -1, self.k, -1)
-
-        # Step 3: Compute edge features
-        relative_features = neighbors - central  # [B, N, k, D]
-        combined_features = torch.cat(
-            [central, relative_features], dim=-1
-        )  # [B, N, k, 2*D + E]
-
-        # Step 4: Apply MLP and aggregation
-        combined_features = self.mlp(
-            combined_features.view(-1, 2 * D)
-        )  # [B * N * k, out_channels]
-        combined_features = combined_features.view(
-            B, N, self.k, -1
-        )  # Reshape to [B, N, k, out_channels]
-
+        Transformer_out = self.encoder(input_T, inp_E_T)
         if self.pooling == "avg":
-            n_out = combined_features.mean(dim=2)
+            Transformer_output = Transformer_out.mean(dim=2)
+            out_H_ = out_H.mean(dim=2)
+
         elif self.pooling == "max":
-            n_out = combined_features.max(dim=2)[0]
+            Transformer_output = Transformer_out.max(dim=2)[0]
+            out_H_ = out_H.max(dim=2)[0]
+
         elif self.pooling == "sum":
-            n_out = combined_features.sum(dim=2)
+            Transformer_output = Transformer_out.sum(dim=2)
+            out_H_ = out_H.sum(dim=2)
 
-        node_outputs1 = n_out.unsqueeze(1).expand(B, N, N, D)
-        node_outputs2 = node_outputs1.permute(0, 2, 1, 3).contiguous()
-        edge_outputs = self.highway(weight_adj, node_outputs1, node_outputs2)
+        output_c = (
+            Transformer_output + out_H_
+        )  # torch.cat((Transformer_output,out_H_),dim=-1)
+        output = self.mlp(output_c)
 
-        return n_out, edge_outputs
+        return output
 
 
 class JetTaggingModule(LightningModule):
@@ -120,29 +140,60 @@ class JetTaggingModule(LightningModule):
 
     def __init__(
         self,
-        in_channels: int = 4,
-        out_channels_n: int = 16,
-        out_channels_E: int = 16,
-        k: int = 4,
+        D: int = 11,  # Number of node features
+        N: int = 100,  # Number of particles in the event
+        f: int = 4,  # Number of edge features
+        n_Transformer: int = 8,  # Number of Transformer layers
+        n_GNN: int = 3,  # Number of GNN layers
+        k: int = 7,  # Number of neighbors or some specific constant
+        expansion_factor: int = 4,  # Expansion factor of the internal MLP in the Transformer layers
+        n_heads: int = 15,  # Number of attention heads
+        masked: bool = True,  # If mask is used
+        pooling: str = "avg",  # Pooling type, options are 'max', 'avg', or 'sum'
+        embed_dim: list[int] = [256, 128, 64],  # Input embedding layers
+        h_dim: int = 64,  # Hidden dimension of the scaling matrices
+        U_dim: list[int] = [512, 256, 128, 64],  # Embedding layers of the edge matrix
+        mlp_f_dim: list[int] = [512, 128, 64],  # Layers of the final MLP
         lr_step: int = 5,
         lr_gamma: float = 0.9,
     ) -> None:
         super().__init__()
 
-        self.in_channels = in_channels
-        self.out_channels_n = out_channels_n
-        self.out_channels_E = out_channels_E
-        self.knn = k
+        self.D = D
+        self.N = N
+        self.f = f
+        self.n_Transformer = n_Transformer
+        self.n_GNN = n_GNN
+        self.k = k
+        self.expansion_factor = expansion_factor
+        self.n_heads = n_heads
+        self.masked = masked
+        self.pooling = pooling
+        self.embed_dim = embed_dim
+        self.h_dim = h_dim
+        self.U_dim = U_dim
+        self.mlp_f_dim = mlp_f_dim
+
         self.lr_step = lr_step
         self.lr_gamma = lr_gamma
         # self.save_hyperparameters()
 
         # Create an instance of the model
-        self.model = EdgeConvWithEdgeFeatures(
-            in_channels=self.in_channels,
-            out_channels_n=self.out_channels_n,
-            out_channels_E=self.out_channels_E,
-            k=self.knn,
+        self.model = IAFormer(
+            self.D,
+            self.N,
+            self.f,
+            self.n_Transformer,
+            self.n_GNN,
+            self.k,
+            expansion_factor=self.expansion_factor,
+            n_heads=self.n_heads,
+            masked=self.masked,
+            pooling=self.pooling,
+            embed_dim=self.embed_dim,
+            h_dim=self.h_dim,
+            U_dim=self.U_dim,
+            mlp_f_dim=self.mlp_f_dim,
         )
 
         # Accuarcy matric
@@ -165,12 +216,12 @@ class JetTaggingModule(LightningModule):
             batch["mask"],
             batch["labels"],
         )
-        model_out = self.model()
+        model_out = self.model(node_features, edge_features).flatten()
         # calculate the loss
-        loss = 0  # torch.nn.functional.binary_cross_entropy(model_out, labels)
-        # acc  = self.accuracy(model_out, labels)
+        loss = torch.nn.functional.binary_cross_entropy(model_out, labels)
+        acc = self.accuracy(model_out, labels)
         self.log("loss", loss, prog_bar=True, sync_dist=True)
-        # self.log("acc", acc, prog_bar=True, sync_dist=True)
+        self.log("acc", acc, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx) -> STEP_OUTPUT:
@@ -184,8 +235,18 @@ class JetTaggingModule(LightningModule):
         Returns:
             STEP_OUTPUT: The validation loss.
         """
-        val_loss = 0
+        node_features, edge_features, masks, labels = (
+            batch["node_features"],
+            batch["edge_features"],
+            batch["mask"],
+            batch["labels"],
+        )
+        model_out = self.model(node_features, edge_features).flatten()
+        # calculate the loss
+        val_loss = torch.nn.functional.binary_cross_entropy(model_out, labels)
+        val_acc = self.accuracy(model_out, labels)
         self.log("val_loss", val_loss, prog_bar=True, sync_dist=True)
+        self.log("val_acc", val_acc, prog_bar=True, sync_dist=True)
         return val_loss
 
     def test_step(self, batch, batch_idx) -> STEP_OUTPUT:
@@ -201,7 +262,7 @@ class JetTaggingModule(LightningModule):
         Returns:
             dict: A dictionary containing the optimizer and learning rate scheduler.
         """
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr_step)
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer, step_size=self.lr_step, gamma=self.lr_gamma
         )
