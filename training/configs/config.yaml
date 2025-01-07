@@ -50,6 +50,6 @@ data:
   class_path: data.data_handling.JetTaggingDataModule
   init_args:
     data_dir: "/mnt/d/waleed/CP-Higgs/GraphTransformer/GraphTransformer/"
-    file_list: ["train.h5", "val.h5", "val.h5"]
+    file_list: ["train-graph.h5", "test.h5", "test.h5"]
     batch_size: 128
     num_workers: 16        
