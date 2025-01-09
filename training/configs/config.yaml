@@ -3,6 +3,7 @@ trainer:
   max_epochs: 1
   accelerator: "gpu"
   devices: [0]
+  profiler: "simple"
   #strategy: "ddp_find_unused_parameters_true"
   precision: "32-true"  # single-precision training
   callbacks:
@@ -50,6 +51,6 @@ data:
   class_path: data.data_handling.JetTaggingDataModule
   init_args:
     data_dir: "/mnt/d/waleed/CP-Higgs/GraphTransformer/GraphTransformer/"
-    file_list: ["train-graph.h5", "test.h5", "test.h5"]
-    batch_size: 128
-    num_workers: 16        
+    file_list: ["train-graph", "test-graph", "test-graph"]
+    batch_size: 256
+    num_workers: 16
