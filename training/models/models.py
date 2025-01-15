@@ -338,7 +338,8 @@ class JetTaggingModule(LightningModule):
         h_dim: int = 64,  # Hidden dimension of the scaling matrices
         U_dim: list[int] = [512, 256, 128, 64],  # Embedding layers of the edge matrix
         mlp_f_dim: list[int] = [512, 128, 64],  # Layers of the final MLP
-        lr_step: int = 5,
+        lr: float = 0.0001, # learning rate
+        lr_step: int = 5, # learning rate scheduler step
         lr_gamma: float = 0.9,
     ) -> None:
         super().__init__()
@@ -358,6 +359,7 @@ class JetTaggingModule(LightningModule):
         self.U_dim = U_dim
         self.mlp_f_dim = mlp_f_dim
 
+        self.lr = lr
         self.lr_step = lr_step
         self.lr_gamma = lr_gamma
         # self.save_hyperparameters()
@@ -455,7 +457,7 @@ class JetTaggingModule(LightningModule):
         Returns:
             dict: A dictionary containing the optimizer and learning rate scheduler.
         """
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr_step)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer, step_size=self.lr_step, gamma=self.lr_gamma
         )

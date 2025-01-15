@@ -44,6 +44,7 @@ model:
     h_dim: 64 # hidden dim of the scaling matrices
     U_dim: [512,256,128,64] # Embedding layers of the edge matrix
     mlp_f_dim: [512,128,64] # layers of the final MLP
+    lr: 0.0001
     lr_step: 5
     lr_gamma: 0.9
 
