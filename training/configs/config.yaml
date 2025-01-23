@@ -1,11 +1,13 @@
 seed_everything: 42
 trainer:
-  max_epochs: 1
+  max_epochs: 10
   accelerator: "gpu"
   devices: [0]
-  profiler: "simple"
+  #profiler: "simple"
   #strategy: "ddp_find_unused_parameters_true"
   precision: "32-true"  # single-precision training
+  #amp_backend: "apex"
+  #amp_level: "O2"    
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
@@ -44,6 +46,7 @@ model:
     h_dim: 64 # hidden dim of the scaling matrices
     U_dim: [512,256,128,64] # Embedding layers of the edge matrix
     mlp_f_dim: [512,128,64] # layers of the final MLP
+    lr: 0.0001
     lr_step: 5
     lr_gamma: 0.9
 
@@ -51,6 +54,6 @@ data:
   class_path: data.data_handling.JetTaggingDataModule
   init_args:
     data_dir: "/mnt/d/waleed/CP-Higgs/GraphTransformer/GraphTransformer/"
-    file_list: ["train-graph", "test-graph", "test-graph"]
-    batch_size: 256
-    num_workers: 16
+    file_list: ["val_graph.h5", "val_graph.h5", "val_graph.h5"]
+    batch_size: 32
+    num_workers: 24

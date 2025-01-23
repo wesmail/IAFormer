@@ -34,6 +34,9 @@ class Embedding(nn.Module):
         return x
 
 
+###########################
+###########################
+###########################
 class mlp(nn.Module):
     """
     Final mlp of the network, after pooling the Transformer encoder output.
@@ -115,14 +118,14 @@ class MultiHead_Self_Attention(nn.Module):
 
         return mask
 
-    def scaled_dot_product_attention(self, Q, K, V, U):
+    def scaled_dot_product_attention(self, Q, K, V):
         """
         Computes scaled dot-product attention.
         dim of U: batch_size x num_heads x particle_tokens x particle_tokens
         """
         d_k = Q.size(-1)
 
-        scores = (torch.matmul(Q, K.transpose(-2, -1)) + U) / torch.sqrt(
+        scores = (torch.matmul(Q, K.transpose(-2, -1))) / torch.sqrt(
             torch.tensor(d_k, dtype=torch.float32)
         )
 
@@ -135,7 +138,7 @@ class MultiHead_Self_Attention(nn.Module):
         output = torch.matmul(attn_weights, V)
         return output, attn_weights
 
-    def forward(self, query, U):
+    def forward(self, query):
         batch_size = query.size(0)
 
         Q = self.q_linear(query)
@@ -148,7 +151,7 @@ class MultiHead_Self_Attention(nn.Module):
         V = V.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
 
         # Apply scaled dot-product attention
-        attn_output, attn_weights = self.scaled_dot_product_attention(Q, K, V, U)
+        attn_output, attn_weights = self.scaled_dot_product_attention(Q, K, V)
 
         # Concatenate heads
         attn_output = (
@@ -209,9 +212,9 @@ class TransformerLayer(nn.Module):
             nn.Linear(self.expansion_factor * self.input_dim, self.input_dim),
         )
 
-    def forward(self, query, U):
+    def forward(self, query):
 
-        attention_out, _ = self.attention(self.norm1(query), U)
+        attention_out, _ = self.attention(self.norm1(query))
         attention_residual_out = self.norm2(attention_out) + query
         norm1_out = self.dropout1(attention_residual_out)
         feed_fwd_out = self.feed_forward(norm1_out)
@@ -221,6 +224,9 @@ class TransformerLayer(nn.Module):
         return norm2_out
 
 
+###########################################
+###########################################
+###########################################
 class TransformerEncoder(nn.Module):
     """
     Args:
@@ -265,12 +271,87 @@ class TransformerEncoder(nn.Module):
                 for i in range(self.num_layers)
             ]
         )
+        self.n1 = nn.LayerNorm(self.embed_dim[-1])
 
-    def forward(self, x, u):
+    def forward(self, x):
         x_new = self.embed(x)
-        out = F.layer_norm(x_new, x_new.shape)
+        out = self.n1(x_new)
 
         for layer in self.layers:
-            out = layer(out, u)
+            out = layer(out)
 
         return out
+
+
+class Transformer_P(nn.Module):
+    def __init__(
+        self,
+        f_dim,
+        n_particles,
+        n_Transformer=2,
+        h_dim=200,
+        expansion_factor=4,
+        n_heads=10,
+        masked=True,
+        pooling="avg",
+        embed_dim=[128, 512, 128],
+        mlp_f_dim=[128, 64],
+    ):
+        super(Transformer_P, self).__init__()
+
+        """
+        Args:
+           f_dim: int, number  of the feature tokens
+           n_particles: int, number  of the particle tokens
+           n_Transformer: int, number of Transformer layers
+           h_dim: int, hidden dim of the Q,K and V
+           expansion_factor: int, expansion of the size of the internal MLP layers in the Transformer layers.
+           n_heads: int, number of attention heads
+           masked: boolean, to use the attention mask
+           Pooling: str, define the pooling kind, avg, max and sum
+           embed_dim: list, define the number of neurons in the MLP for features embedding
+           mlp_f_dim: list, define the number of neurons in the final MLP   
+         
+        return:
+                transformer netwirk with pairwise interaction matrix included.
+        """
+        self.f_dim = f_dim
+        self.n_particles = n_particles
+        self.n_Transformer = n_Transformer
+        self.n_heads = n_heads
+        self.masked = masked
+        self.expansion_factor = expansion_factor
+        self.h_dim = h_dim
+        self.pooling = pooling
+        self.embed_dim = embed_dim
+        self.mlp_f_dim = mlp_f_dim
+        self.mlp = mlp(self.n_particles, self.mlp_f_dim)
+        self.encoder = TransformerEncoder(
+            self.f_dim,
+            embed_dim=self.embed_dim,
+            h_dim=self.h_dim,
+            num_layers=self.n_Transformer,
+            expansion_factor=self.expansion_factor,
+            n_heads=self.n_heads,
+            masked=self.masked,
+        )
+
+    def forward(self, inp_T):
+        """
+        input_T: dim (batch, particle tokens, feature tokens)
+        input_E: dim (batch, particle tokens, particle tokens, pairwise features)
+        """
+
+        Transformer_out = self.encoder(inp_T)
+        if self.pooling == "avg":
+            Transformer_output = Transformer_out.mean(dim=2)
+
+        elif self.pooling == "max":
+            Transformer_output = Transformer_out.max(dim=2)[0]
+
+        elif self.pooling == "sum":
+            Transformer_output = Transformer_out.sum(dim=2)
+
+        output = self.mlp(Transformer_output)
+
+        return output

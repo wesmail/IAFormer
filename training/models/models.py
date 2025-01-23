@@ -1,3 +1,6 @@
+# Generic imports
+import math
+
 # Torch imports
 import torch
 import torch.nn as nn
@@ -11,247 +14,157 @@ from lightning.pytorch.utilities.types import STEP_OUTPUT
 from torchmetrics import Accuracy
 
 # Framework imports
-from models.transformer import mlp, Embedding, TransformerEncoder, TransformerLayer
-from models.gnn import EEDGCNEncoder, EdgeConvWithEdgeFeatures
+from models.transformer import Transformer_P
 
 
-class IAFormer(nn.Module):
-    def __init__(
-        self,
-        f_dim,
-        n_particles,
-        U_features,
-        k=7,
-        n_Transformer=2,
-        n_GNNLayers=4,
-        h_dim=200,
-        expansion_factor=4,
-        n_heads=10,
-        masked=True,
-        pooling="avg",
-        embed_dim=[128, 512, 128],
-        U_dim=[128, 64, 64, 10],
-        mlp_f_dim=[128, 64],
-    ):
-        super(IAFormer, self).__init__()
+# ******************************************************************************************************************************************
+def lambda_init_fn(depth):
+    return 0.8 - 0.6 * math.exp(-0.3 * depth)
 
-        """
-        Args:
-           f_dim: int, number  of the feature tokens
-           n_particles: int, number  of the particle tokens
-           U_features: int, number of the featires in the pairwise interaction matrix
-           n_Transformer: int, number of Transformer layers
-           h_dim: int, hidden dim of the Q,K and V
-           expansion_factor: int, expansion of the size of the internal MLP layers in the Transformer layers.
-           n_heads: int, number of attention heads
-           masked: boolean, to use the attention mask
-           Pooling: str, define the pooling kind, avg, max and sum
-           embed_dim: list, define the number of neurons in the MLP for features embedding
-           U_dim: list, define the number of neuron in the MLP for pairwise interaction embedding.
-                                                                      The last number must equals the number of attention heads
-           mlp_f_dim: list, define the number of neurons in the final MLP   
-         
-        return:
-                transformer netwirk with pairwise interaction matrix included.
-        """
-        self.f_dim = f_dim
-        self.n_particles = n_particles
-        self.U_features = U_features
-        self.k = k
-        self.n_Transformer = n_Transformer
-        self.n_GNNLayers = n_GNNLayers
-        self.n_heads = n_heads
-        self.masked = masked
-        self.expansion_factor = expansion_factor
-        self.h_dim = h_dim
-        self.pooling = pooling
+
+class ParticleEmbedding(nn.Module):
+    def __init__(self, input_dim=11):
+        super(ParticleEmbedding, self).__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.GELU(),
+            nn.LayerNorm(128),
+            nn.Linear(128, 128),
+            nn.GELU(),
+            nn.LayerNorm(128),
+            nn.Linear(128, 512),
+            nn.GELU(),
+            nn.LayerNorm(512),
+            nn.Linear(512, 128),
+            nn.GELU(),
+        )
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
+class InteractionInputEncoding(nn.Module):
+    def __init__(self, input_dim=4, output_dim=8):
+        super(InteractionInputEncoding, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv1d(input_dim, 64, kernel_size=1),
+            nn.BatchNorm1d(64),
+            nn.GELU(),
+            nn.Conv1d(64, 64, kernel_size=1),
+            nn.BatchNorm1d(64),
+            nn.GELU(),
+            nn.Conv1d(64, 64, kernel_size=1),
+            nn.BatchNorm1d(64),
+            nn.GELU(),
+            nn.Conv1d(64, output_dim, kernel_size=1),
+            nn.BatchNorm1d(output_dim),
+            nn.GELU(),
+        )
+
+    def forward(self, x):
+        bs, tokens = x.size(0), x.size(1)
+        x = x.view(bs, -1, x.size(-1)).permute(0, 2, 1)
+        x = self.conv(x).permute(0, 2, 1)
+
+        return x.view(bs, tokens, tokens, x.size(-1))
+
+
+class MultiheadDiffAttn(nn.Module):
+    def __init__(self, embed_dim, depth, num_heads):
+        super().__init__()
         self.embed_dim = embed_dim
-        self.mlp_f_dim = mlp_f_dim
-        self.U_dim = U_dim
-        self.mlp = mlp(self.n_particles, self.mlp_f_dim)
-        self.U_embeding = Embedding(self.U_features, self.U_dim)
-        self.embed = Embedding(self.f_dim, self.embed_dim)
-        self.encoder = TransformerEncoder(
-            self.f_dim,
-            embed_dim=self.embed_dim,
-            h_dim=self.h_dim,
-            num_layers=self.n_Transformer,
-            expansion_factor=self.expansion_factor,
-            n_heads=self.n_heads,
-            masked=self.masked,
+        self.num_heads = num_heads
+
+        # Dimension per head
+        self.head_dim = embed_dim // num_heads // 2  # 2 attention maps
+        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        assert embed_dim % 2 == 0, "embed_dim must be divisible by 2"
+        self.scaling = self.head_dim**-0.5
+
+        # Projections
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        # Lambda parameters
+        self.lambda_init = lambda_init_fn(depth)
+        self.lambda_q1 = nn.Parameter(
+            torch.zeros(self.head_dim).normal_(mean=0, std=0.1)
         )
-        self.GNNencoder = EEDGCNEncoder(
-            self.embed_dim[-1],
-            self.embed_dim[-1],
-            self.U_dim[-1],
-            self.U_dim[-1],
-            self.k,
-            self.n_GNNLayers,
-            self.pooling,
+        self.lambda_k1 = nn.Parameter(
+            torch.zeros(self.head_dim).normal_(mean=0, std=0.1)
         )
-        self.nW = nn.Linear(self.U_dim[-1], self.n_heads)
-        self.nH = nn.LayerNorm(self.f_dim)
-        self.nE = nn.LayerNorm(self.U_features)
-
-    def forward(self, input_T, input_E):
-        """
-        input_T: dim (batch, particle tokens, feature tokens)
-        input_E: dim (batch, particle tokens, particle tokens, pairwise features)
-        """
-        inp_E = self.U_embeding(input_E)
-        inp_T = self.embed(input_T)
-        out_H, out_E = self.GNNencoder(inp_T, inp_E)
-
-        inp_E_T = torch.permute(self.nW(out_E), (0, -1, 1, 2))
-
-        Transformer_out = self.encoder(input_T, inp_E_T)
-        if self.pooling == "avg":
-            Transformer_output = Transformer_out.mean(dim=2)
-            out_H_ = out_H.mean(dim=2)
-
-        elif self.pooling == "max":
-            Transformer_output = Transformer_out.max(dim=2)[0]
-            out_H_ = out_H.max(dim=2)[0]
-
-        elif self.pooling == "sum":
-            Transformer_output = Transformer_out.sum(dim=2)
-            out_H_ = out_H.sum(dim=2)
-
-        output_c = (
-            Transformer_output + out_H_
-        )  # torch.cat((Transformer_output,out_H_),dim=-1)
-        output = self.mlp(output_c)
-
-        return output
-
-
-class IAFormer_old(nn.Module):
-    def __init__(
-        self,
-        f_dim,
-        n_particles,
-        U_features,
-        k=7,
-        n_layers=2,
-        h_dim=200,
-        expansion_factor=4,
-        n_heads=10,
-        masked=True,
-        pooling="avg",
-        embed_dim=[128, 512, 128],
-        U_dim=[128, 64, 64, 10],
-        mlp_f_dim=[128, 64],
-    ):
-        super(IAFormer_old, self).__init__()
-
-        """
-        Args:
-           f_dim: int, number  of the feature tokens
-           n_particles: int, number  of the particle tokens
-           U_features: int, number of the featires in the pairwise interaction matrix
-           n_Transformer: int, number of Transformer layers
-           h_dim: int, hidden dim of the Q,K and V
-           expansion_factor: int, expansion of the size of the internal MLP layers in the Transformer layers.
-           n_heads: int, number of attention heads
-           masked: boolean, to use the attention mask
-           Pooling: str, define the pooling kind, avg, max and sum
-           embed_dim: list, define the number of neurons in the MLP for features embedding
-           U_dim: list, define the number of neuron in the MLP for pairwise interaction embedding.
-                                                                      The last number must equals the number of attention heads
-           mlp_f_dim: list, define the number of neurons in the final MLP   
-         
-        return:
-                transformer netwirk with pairwise interaction matrix included.
-        """
-        self.f_dim = f_dim
-        self.n_particles = n_particles
-        self.U_features = U_features
-        self.k = k
-        self.n_layers = n_layers
-        self.n_heads = n_heads
-        self.masked = masked
-        self.expansion_factor = expansion_factor
-        self.h_dim = h_dim
-        self.pooling = pooling
-        self.embed_dim = embed_dim
-        self.mlp_f_dim = mlp_f_dim
-        self.U_dim = U_dim
-        self.mlp = mlp(self.n_particles, self.mlp_f_dim)
-        self.U_embeding = Embedding(self.U_features, self.U_dim)
-        self.embed = Embedding(self.f_dim, self.embed_dim)
-        self.layers_T = nn.ModuleList(
-            [
-                TransformerLayer(
-                    self.embed_dim[-1],
-                    self.h_dim,
-                    self.expansion_factor,
-                    self.n_heads,
-                    self.masked,
-                )
-                for _ in range(self.n_layers)
-            ]
+        self.lambda_q2 = nn.Parameter(
+            torch.zeros(self.head_dim).normal_(mean=0, std=0.1)
         )
-        self.layers_G = nn.ModuleList(
-            [
-                EdgeConvWithEdgeFeatures(
-                    self.embed_dim[-1],
-                    self.embed_dim[-1],
-                    self.U_dim[-1],
-                    self.k,
-                    self.pooling,
-                )
-                for _ in range(self.n_layers)
-            ]
+        self.lambda_k2 = nn.Parameter(
+            torch.zeros(self.head_dim).normal_(mean=0, std=0.1)
         )
-        self.nW = nn.Linear(self.U_dim[-1], self.n_heads)
-        self.nH = nn.LayerNorm(self.f_dim)
-        self.nE = nn.LayerNorm(self.U_features)
 
-    def forward(self, input_T, input_E):
-        """
-        input_T: dim (batch, particle tokens, feature tokens)
-        input_E: dim (batch, particle tokens, particle tokens, pairwise features)
-        """
-        input_E_ = self.nE(input_E)
-        input_T_ = self.nH(input_T)
-        inp_E = self.U_embeding(input_E_)
-        inp_T = self.embed(input_T_)
-        inp_H = self.embed(input_T_)
+        # Normalization layer
+        self.subln = nn.LayerNorm(self.head_dim * 2)
 
-        for gnn_layer, attention_layer in zip(self.layers_G, self.layers_T):
+    def forward(self, x, u=None):
+        batch_size, num_tokens, _ = x.size()
 
-            inp_H, inp_E = gnn_layer(inp_H, inp_E)
+        # Linear projections
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
 
-            inp_E_T = torch.permute(self.nW(inp_E), (0, -1, 1, 2))
-            inp_T = attention_layer(inp_T, inp_E_T)
+        # Reshape into heads
+        q = q.view(batch_size, num_tokens, self.num_heads * 2, self.head_dim).transpose(
+            1, 2
+        )  # shape (bs, num_heads*2, num_tokens, head_dim)
+        k = k.view(batch_size, num_tokens, self.num_heads * 2, self.head_dim).transpose(
+            1, 2
+        )
+        v = v.view(batch_size, num_tokens, self.num_heads, 2 * self.head_dim).transpose(
+            1, 2
+        )
 
-        if self.pooling == "avg":
-            Transformer_output = inp_T.mean(dim=2)
-            out_H_ = inp_H.mean(dim=2)
+        # Scale queries
+        q *= self.scaling
 
-        elif self.pooling == "max":
-            Transformer_output = inp_T.max(dim=2)[0]
-            out_H_ = inp_H.max(dim=2)[0]
+        # Compute attention weights
+        attn_weights = torch.matmul(q, k.transpose(-1, -2))
+        if u is not None:
+            mask = ~u.bool()
+            u.masked_fill_(mask, -torch.inf)
+            attn_weights += u.transpose(3, 1)
 
-        elif self.pooling == "sum":
-            Transformer_output = inp_T.sum(dim=2)
-            out_H_ = inp_H.sum(dim=2)
+        attn_weights = F.softmax(attn_weights, dim=-1)
 
-        output_c = (
-            Transformer_output + out_H_
-        )  # torch.cat((Transformer_output,out_H_),dim=-1)
-        output = self.mlp(output_c)
+        # Compute lambda
+        lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float())
+        lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float())
+        lambda_full = lambda_1 - lambda_2 + self.lambda_init
 
-        return output
+        # Apply differential attention
+        attn_weights = attn_weights.view(
+            batch_size, self.num_heads, 2, num_tokens, num_tokens
+        )
+        attn_weights = attn_weights[:, :, 0] - lambda_full * attn_weights[:, :, 1]
+        # Weighted sum
+        attn = torch.matmul(attn_weights, v)
+
+        # Normalize and reshape
+        attn = self.subln(attn)
+        attn = attn.transpose(1, 2).reshape(batch_size, num_tokens, self.embed_dim)
+
+        # Final projection
+        attn = self.out_proj(attn)
+        return attn
 
 
 class ParticleAttentionBlock(nn.Module):
-    def __init__(self, embed_dim, expansion_factor=4, num_heads=1):
+    def __init__(self, embed_dim, expansion_factor=4, num_heads=1, num_layers=1):
         super(ParticleAttentionBlock, self).__init__()
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
-        self.pmha = nn.MultiheadAttention(
-            embed_dim=embed_dim, num_heads=num_heads, batch_first=True
+        self.pmha = MultiheadDiffAttn(
+            embed_dim=embed_dim, num_heads=num_heads, depth=num_layers
         )
         self.mlp = nn.Sequential(
             nn.LayerNorm(embed_dim),
@@ -264,49 +177,171 @@ class ParticleAttentionBlock(nn.Module):
     def forward(self, x, u=None):
         x_res = x
         x = self.norm1(x)
-        attn_output, _ = self.pmha(
-            x, x, x, need_weights=False, attn_mask=u.flatten(start_dim=0, end_dim=1)
-        )
+        attn_output = self.pmha(x, u)  # x, and u embeddings
         x = self.norm2(attn_output)
         h = x + x_res
         z = self.mlp(h)
         return z + h
 
 
+class DynamicEdgeConv(nn.Module):
+    def __init__(self, in_channels, embed_dim, k, out_channels=None):
+        super(DynamicEdgeConv, self).__init__()
+        self.k = k
+        out_channels = embed_dim if out_channels is None else out_channels
+        self.mlp = nn.Sequential(
+            nn.Linear(in_channels * 2, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, out_channels),
+            nn.LayerNorm(out_channels),
+            nn.GELU(),
+        )
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input point cloud data, shape [B, N, D]
+               B - batch size, N - number of points, D - feature dimensions
+        Returns:
+            x_out: Updated features after EdgeConv, shape [B, N, out_channels]
+        """
+        B, N, D = x.size()
+
+        # Step 1: Compute pairwise distance and get k-nearest neighbors
+        # TODO: remove hard-coded 8 and 9 to replace with eta and phi
+        pairwise_dist = torch.cdist(x[..., [8, 9]], x[..., [8, 9]], p=2)  # [B, N, N]
+        idx = pairwise_dist.topk(k=self.k, dim=-1, largest=False)[1]  # [B, N, k]
+
+        # Step 2: Gather neighbor features
+        neighbors = torch.gather(
+            x.unsqueeze(2).expand(-1, -1, N, -1),
+            2,
+            idx.unsqueeze(-1).expand(-1, -1, -1, D),
+        )  # [B, N, k, D]
+
+        # Central point repeated for k neighbors: [B, N, k, D]
+        central = x.unsqueeze(2).expand(-1, -1, self.k, -1)
+
+        # Step 3: Compute edge features
+        relative_features = neighbors - central  # [B, N, k, D]
+        combined_features = torch.cat(
+            [central, relative_features], dim=-1
+        )  # [B, N, k, 2*D]
+
+        # Step 4: Apply MLP and aggregation
+        combined_features = self.mlp(
+            combined_features.view(-1, 2 * D)
+        )  # [B * N * k, out_channels]
+        combined_features = combined_features.view(
+            B, N, self.k, -1
+        )  # Reshape to [B, N, k, out_channels]
+
+        # Aggregate (avg pooling across neighbors)
+        x_out = combined_features.mean(dim=2)  # [B, N, out_channels]
+
+        return x_out
+
+
+class ParticleNet(nn.Module):
+    def __init__(
+        self, in_channels=11, num_layers=3, embed_dims=[64, 128, 256], k=[16, 16, 16]
+    ):
+        super(ParticleNet, self).__init__()
+
+        # Ensure embed_dims and k are lists
+        assert isinstance(
+            embed_dims, list
+        ), f"Expected embed_dims to be a list, but got {type(embed_dims)}"
+        assert isinstance(k, list), f"Expected k to be a list, but got {type(k)}"
+
+        # Assertion to ensure embed_dims and k have length 3
+        assert (
+            len(embed_dims) == num_layers
+        ), f"Expected embed_dims to have the same length as 'num_layers={num_layers}', but got {len(embed_dims)}"
+        assert (
+            len(k) == num_layers
+        ), f"Expected k to have length the same length as 'num_layers={num_layers}', but got {len(k)}"
+
+        # Creating a list of DynamicEdgeConv layers
+        self.edge_conv = nn.ModuleList(
+            [
+                DynamicEdgeConv(
+                    in_channels=in_channels if i == 0 else embed_dims[i - 1],
+                    embed_dim=embed_dims[i],
+                    k=k[i],
+                )
+                for i in range(num_layers)
+            ]
+        )
+
+        # self.classifier = nn.Sequential(nn.Linear(embed_dims[-1], embed_dims[-1]),
+        #                                nn.GELU(),
+        #                                nn.Dropout(0.1),
+        #                                nn.Linear(embed_dims[-1], 1))
+
+    def forward(self, x):
+        # Pass input through each DynamicEdgeConv layer
+        for conv in self.edge_conv:
+            x = conv(x)
+
+        # Aggregate over the token dim
+        # x_out = x.mean(dim=1)
+
+        return x
+
+
 class ParticleTransformer(nn.Module):
     def __init__(
         self,
-        feat_particles,
-        feat_interaction,
+        feat_particles_dim,
+        feat_interaction_dim,
         embed_dim,
         num_heads,
         num_blocks,
+        k=[16, 32, 32],
         num_classes=1,
     ):
         super(ParticleTransformer, self).__init__()
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
-        self.particle_embed = nn.Linear(feat_particles, embed_dim)
-        self.interaction_embed = nn.Linear(feat_interaction, num_heads)
+        self.particle_embed = ParticleNet(in_channels=feat_particles_dim, k=k)
+        self.interaction_embed = InteractionInputEncoding(
+            input_dim=feat_interaction_dim, output_dim=num_heads * 2
+        )
         self.blocks = nn.ModuleList(
             [
-                ParticleAttentionBlock(embed_dim=embed_dim, num_heads=num_heads)
+                ParticleAttentionBlock(
+                    embed_dim=embed_dim, num_heads=num_heads, num_layers=num_blocks
+                )
                 for _ in range(num_blocks)
             ]
         )
-        self.mlp_head = nn.Sequential(nn.Linear(embed_dim, num_classes))
+        self.mlp_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(embed_dim, num_classes),
+        )
 
     def forward(self, particles, interactions):
         x = self.particle_embed(particles)
-        u = self.interaction_embed(interactions).transpose(3, 1)
+        u = self.interaction_embed(interactions)
 
         for block in self.blocks:
             x = block(x, u)
 
         # Aggregate features (e.g., mean pooling)
+        # TODO: let user choose pooling function
         x = x.mean(dim=1)  # Pool across particles
 
         logits = self.mlp_head(x)
         return logits
+
+
+# ******************************************************************************************************************************************
 
 
 class JetTaggingModule(LightningModule):
@@ -340,6 +375,7 @@ class JetTaggingModule(LightningModule):
         mlp_f_dim: list[int] = [512, 128, 64],  # Layers of the final MLP
         lr_step: int = 5,
         lr_gamma: float = 0.9,
+        lr: float = 0.0001,
     ) -> None:
         super().__init__()
 
@@ -358,33 +394,18 @@ class JetTaggingModule(LightningModule):
         self.U_dim = U_dim
         self.mlp_f_dim = mlp_f_dim
 
+        self.lr = lr
         self.lr_step = lr_step
         self.lr_gamma = lr_gamma
         # self.save_hyperparameters()
 
-        # Create an instance of the model
-        # self.model = IAFormer_old(
-        #    self.D,
-        #    self.N,
-        #    self.f,
-        #    self.k,
-        #    n_layers=self.n_Transformer,
-        #    # self.n_GNN,
-        #    expansion_factor=self.expansion_factor,
-        #    n_heads=self.n_heads,
-        #    masked=self.masked,
-        #    pooling=self.pooling,
-        #    embed_dim=self.embed_dim,
-        #    h_dim=self.h_dim,
-        #    U_dim=self.U_dim,
-        #    mlp_f_dim=self.mlp_f_dim,
-        # )
         self.model = ParticleTransformer(
-            feat_particles=11,
-            feat_interaction=4,
-            embed_dim=128,
+            feat_particles_dim=11,
+            feat_interaction_dim=4,
+            embed_dim=256,  # TODO: Must match last embed dim for particle-net
             num_heads=8,
-            num_blocks=8,
+            num_blocks=4,
+            k=[16, 16, 32],
         )
 
         # Accuarcy matric
@@ -401,13 +422,12 @@ class JetTaggingModule(LightningModule):
         Returns:
             STEP_OUTPUT: The training loss.
         """
-        node_features, edge_features, masks, labels = (
+        x, edge_attr, labels = (
             batch["node_features"],
             batch["edge_features"],
-            batch["mask"],
             batch["labels"],
         )
-        model_out = self.model(node_features, edge_features).flatten()
+        model_out = self.model(x, edge_attr).flatten()
         # calculate the loss
         loss = torch.nn.functional.binary_cross_entropy_with_logits(model_out, labels)
         acc = self.accuracy(model_out, labels)
@@ -426,13 +446,12 @@ class JetTaggingModule(LightningModule):
         Returns:
             STEP_OUTPUT: The validation loss.
         """
-        node_features, edge_features, masks, labels = (
+        x, edge_attr, labels = (
             batch["node_features"],
             batch["edge_features"],
-            batch["mask"],
             batch["labels"],
         )
-        model_out = self.model(node_features, edge_features).flatten()
+        model_out = self.model(x, edge_attr).flatten()
         # calculate the loss
         val_loss = torch.nn.functional.binary_cross_entropy_with_logits(
             model_out, labels
@@ -455,7 +474,7 @@ class JetTaggingModule(LightningModule):
         Returns:
             dict: A dictionary containing the optimizer and learning rate scheduler.
         """
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr_step)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer, step_size=self.lr_step, gamma=self.lr_gamma
         )
