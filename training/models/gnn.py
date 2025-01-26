@@ -107,3 +107,112 @@ class EdgeConvWithEdgeFeatures(nn.Module):
         edge_outputs = self.highway(weight_adj,node_outputs1,node_outputs2)
         
         return n_out,edge_outputs
+
+class DynamicEdgeConv(nn.Module):
+    def __init__(self, in_channels, embed_dim, k, out_channels=None):
+        super(DynamicEdgeConv, self).__init__()
+        self.k = k
+        out_channels = embed_dim if out_channels is None else out_channels
+        self.mlp = nn.Sequential(
+            nn.Linear(in_channels * 2, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, out_channels),
+            nn.LayerNorm(out_channels),
+            nn.GELU(),
+        )
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input point cloud data, shape [B, N, D]
+               B - batch size, N - number of points, D - feature dimensions
+        Returns:
+            x_out: Updated features after EdgeConv, shape [B, N, out_channels]
+        """
+        B, N, D = x.size()
+
+        # Step 1: Compute pairwise distance and get k-nearest neighbors
+        # TODO: remove hard-coded 8 and 9 to replace with eta and phi
+        pairwise_dist = torch.cdist(x[..., [8, 9]], x[..., [8, 9]], p=2)  # [B, N, N]
+        idx = pairwise_dist.topk(k=self.k, dim=-1, largest=False)[1]  # [B, N, k]
+
+        # Step 2: Gather neighbor features
+        neighbors = torch.gather(
+            x.unsqueeze(2).expand(-1, -1, N, -1),
+            2,
+            idx.unsqueeze(-1).expand(-1, -1, -1, D),
+        )  # [B, N, k, D]
+
+        # Central point repeated for k neighbors: [B, N, k, D]
+        central = x.unsqueeze(2).expand(-1, -1, self.k, -1)
+
+        # Step 3: Compute edge features
+        relative_features = neighbors - central  # [B, N, k, D]
+        combined_features = torch.cat(
+            [central, relative_features], dim=-1
+        )  # [B, N, k, 2*D]
+
+        # Step 4: Apply MLP and aggregation
+        combined_features = self.mlp(
+            combined_features.view(-1, 2 * D)
+        )  # [B * N * k, out_channels]
+        combined_features = combined_features.view(
+            B, N, self.k, -1
+        )  # Reshape to [B, N, k, out_channels]
+
+        # Aggregate (avg pooling across neighbors)
+        x_out = combined_features.mean(dim=2)  # [B, N, out_channels]
+
+        return x_out
+
+
+class ParticleNet(nn.Module):
+    def __init__(
+        self, in_channels=11, num_layers=3, embed_dims=[64, 128, 256], k=[16, 16, 16]
+    ):
+        super(ParticleNet, self).__init__()
+
+        # Ensure embed_dims and k are lists
+        assert isinstance(
+            embed_dims, list
+        ), f"Expected embed_dims to be a list, but got {type(embed_dims)}"
+        assert isinstance(k, list), f"Expected k to be a list, but got {type(k)}"
+
+        # Assertion to ensure embed_dims and k have length 3
+        assert (
+            len(embed_dims) == num_layers
+        ), f"Expected embed_dims to have the same length as 'num_layers={num_layers}', but got {len(embed_dims)}"
+        assert (
+            len(k) == num_layers
+        ), f"Expected k to have length the same length as 'num_layers={num_layers}', but got {len(k)}"
+
+        # Creating a list of DynamicEdgeConv layers
+        self.edge_conv = nn.ModuleList(
+            [
+                DynamicEdgeConv(
+                    in_channels=in_channels if i == 0 else embed_dims[i - 1],
+                    embed_dim=embed_dims[i],
+                    k=k[i],
+                )
+                for i in range(num_layers)
+            ]
+        )
+
+        # self.classifier = nn.Sequential(nn.Linear(embed_dims[-1], embed_dims[-1]),
+        #                                nn.GELU(),
+        #                                nn.Dropout(0.1),
+        #                                nn.Linear(embed_dims[-1], 1))
+
+    def forward(self, x):
+        # Pass input through each DynamicEdgeConv layer
+        for conv in self.edge_conv:
+            x = conv(x)
+
+        # Aggregate over the token dim
+        # x_out = x.mean(dim=1)
+
+        return x        
