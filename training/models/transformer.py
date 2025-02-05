@@ -2,6 +2,216 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class ParticleAttentionBlock(nn.Module):
+    def __init__(self, embed_dim, expansion_factor=4, num_heads=1, num_layers=1):
+        super(ParticleAttentionBlock, self).__init__()
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.pmha = MultiheadDiffAttn(
+            embed_dim=embed_dim, num_heads=num_heads, depth=num_layers
+        )
+        self.mlp = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, expansion_factor * embed_dim),
+            nn.GELU(),
+            nn.LayerNorm(expansion_factor * embed_dim),
+            nn.Linear(expansion_factor * embed_dim, embed_dim),
+        )
+
+    def forward(self, x, u=None, umask=None):
+        x_res = x
+        x = self.norm1(x)
+        attn_output = self.pmha(x, u, umask)  # x, and u embeddings
+        x = self.norm2(attn_output)
+        h = x + x_res
+        z = self.mlp(h)
+        return z + h
+
+
+class DynamicEdgeConv(MessagePassing):
+    def __init__(self, in_channels=2, embed_dim=32, k=6, c_weight=0.001):
+        super().__init__(aggr="mean")  #  "Max" aggregation.
+        self.k = k
+        # self.c_weight = c_weight
+        self.phi_e = nn.Sequential(
+            nn.BatchNorm1d(in_channels),
+            nn.Linear(in_channels, embed_dim, bias=False),
+            nn.BatchNorm1d(embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+        )
+
+        self.phi_m = nn.Sequential(nn.Linear(embed_dim, 1), nn.Sigmoid())
+
+        layer = nn.Linear(embed_dim, 1, bias=False)
+        torch.nn.init.xavier_uniform_(layer.weight, gain=0.001)
+
+        self.phi_x = nn.Sequential(nn.Linear(embed_dim, embed_dim), nn.GELU(), layer)
+
+        self.register_buffer("metric", torch.tensor([1, -1, -1, -1]))
+
+    def normsq4(self, p):
+        return torch.sum(p**2 * self.metric, dim=-1, keepdim=True)  # [N, 1]
+
+    def dotsq4(self, p, q):
+        return torch.sum(p * q * self.metric, dim=-1, keepdim=True)  # [N, 1]
+
+    def psi(self, p):
+        return torch.sign(p) * torch.log(torch.abs(p) + 1)
+
+    def minkowski_feats(self, x, edge_index):
+        row, col = edge_index
+        x_i, x_j = x[row], x[col]
+        x_diff = x_i - x_j
+        norms = self.psi(self.normsq4(x_diff))  # [E, 1]
+        dots = self.psi(self.dotsq4(x_i, x_j))  # [E, 1]
+        return norms, dots
+
+    def forward(self, x, edge_index, batch=None):
+        # x has shape [N, in_channels]
+        # edge_index has shape [2, E]
+
+        edge_index = knn_graph(x, self.k, batch, loop=False, flow=self.flow)
+        return self.propagate(edge_index, x=x)
+
+    def update(self, aggr_out, x):
+        # x_new = x + c * aggregated messages
+        return x + aggr_out  # L 60 in models.py
+
+    def message(self, x_i, x_j):
+        # x_i has shape [E, in_channels]
+        # x_j has shape [E, in_channels]
+
+        x_diff = x_i - x_j
+        norms = self.psi(self.normsq4(x_diff))  # [E, 1]
+        dots = self.psi(self.dotsq4(x_i, x_j))  # [E, 1]
+
+        out = torch.cat([norms, dots], dim=1)  # tmp has shape [E, 2]
+        out = self.phi_e(out)
+        w = self.phi_m(out)
+        out = out * w
+        scale = self.phi_x(out)  # [E, 1]
+        aggr = scale * x_diff
+        return aggr  # [N, 4]
+
+
+class ParticleNet(nn.Module):
+    def __init__(
+        self, in_channels=4, num_layers=3, embed_dims=[64, 128, 256], k=[16, 16, 16]
+    ):
+        super(ParticleNet, self).__init__()
+
+        # Ensure embed_dims and k are lists
+        assert isinstance(
+            embed_dims, list
+        ), f"Expected embed_dims to be a list, but got {type(embed_dims)}"
+        assert isinstance(k, list), f"Expected k to be a list, but got {type(k)}"
+
+        # Assertion to ensure embed_dims and k have length 3
+        assert (
+            len(embed_dims) == num_layers
+        ), f"Expected embed_dims to have the same length as 'num_layers={num_layers}', but got {len(embed_dims)}"
+        assert (
+            len(k) == num_layers
+        ), f"Expected k to have length the same length as 'num_layers={num_layers}', but got {len(k)}"
+
+        # Creating a list of DynamicEdgeConv layers
+        self.edge_conv = nn.ModuleList(
+            [
+                DynamicEdgeConv(
+                    embed_dim=embed_dims[i],
+                    k=k[i],
+                )
+                for i in range(num_layers)
+            ]
+        )
+
+        # self.lin = nn.Sequential(
+        #    nn.Linear(in_channels, 64), nn.GELU(), nn.Dropout(0.1), nn.Linear(64, 1)
+        # )
+
+    def forward(self, x, edge_index, batch, mask=None):
+        # Pass input through each DynamicEdgeConv layer
+        for conv in self.edge_conv:
+            x = conv(x, edge_index, batch)
+
+        # Aggregate
+        # x = global_mean_pool(x, batch)  # [batch_size, hidden_channels]
+
+        # return self.lin(x)
+
+        if mask is not None:
+            pad_mask = (mask == 1).sum(dim=-1)
+            # Split x into chunks according to the mask
+            chunks = torch.split(x, pad_mask.tolist(), dim=0)
+            # Pad each chunk to max_b and stack them
+            x = torch.nn.utils.rnn.pad_sequence(
+                chunks, batch_first=True, padding_value=0
+            )
+
+        return x
+
+
+class ParticleTransformer(nn.Module):
+    def __init__(
+        self,
+        embed_dim=128,
+        num_heads=8,
+        num_blocks=6,
+        k=[16, 32, 32],
+        num_classes=1,
+    ):
+        super(ParticleTransformer, self).__init__()
+        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        self.u_embed_dim = num_heads * 2
+        # self.particle_net = ParticleNet(num_layers=3, embed_dims=[16, 32, 64], k=[4, 8, 16])
+        self.particle_embed = ParticleEmbedding(input_dim=4)
+        self.interaction_embed = InteractionInputEncoding(
+            input_dim=4, output_dim=self.u_embed_dim
+        )
+
+        self.blocks = nn.ModuleList(
+            [
+                ParticleAttentionBlock(
+                    embed_dim=embed_dim, num_heads=num_heads, num_layers=num_blocks
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+        self.mlp_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(embed_dim, num_classes),
+        )
+
+    def forward(self, x, u=None, pmask=None):
+        # x = self.particle_net(x, edge_index, batch, pmask)
+        if pmask is not None:
+            pad_mask = (pmask == 1).sum(dim=-1)
+            x = x[:, : pad_mask.max()]
+            u = self.interaction_embed(u[:, : pad_mask.max(), : pad_mask.max(), :])
+        x = self.particle_embed(x)
+        # num_particles = x.size(1)
+        umask = (
+            (u == 0)[:, : pad_mask.max(), : pad_mask.max(), 0]
+            .bool()
+            .unsqueeze(-1)
+            .repeat(1, 1, 1, self.u_embed_dim)
+        )
+        # u = self.interaction_embed(u[:, :num_particles, :num_particles, :])
+
+        for block in self.blocks:
+            x = block(x, u, umask)
+
+        # Aggregate features (e.g., mean pooling)
+        # TODO: let user choose pooling function
+        x = x.mean(dim=1)  # Pool across particles
+
+        logits = self.mlp_head(x)
+        return logits
+
 
 class Embedding(nn.Module):
     """
