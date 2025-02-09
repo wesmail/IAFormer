@@ -1,11 +1,11 @@
 seed_everything: 42
 trainer:
-  max_epochs: 1
+  max_epochs: 25
   accelerator: "gpu"
-  devices: [0]
-  profiler: "simple"
-  #strategy: "ddp_find_unused_parameters_true"
-  precision: "32-true"  # single-precision training
+  devices: [0,1,2,3]
+  strategy: "ddp_find_unused_parameters_false"
+  precision: "16-mixed"  # mixed-precision training
+  accumulate_grad_batches: 2
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
@@ -19,7 +19,7 @@ trainer:
       init_args:
         monitor: "val_loss"
         min_delta: 0.0
-        patience: 3
+        patience: 4
         verbose: false
   logger:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
@@ -30,28 +30,23 @@ trainer:
 model:
   class_path: models.models.JetTaggingModule
   init_args:
-    D: 11 # number of node features
-    N: 100 # number of the particles in the event
-    f: 4   # number of edge features
-    n_Transformer: 8 # Number of Transformer layers
-    n_GNN: 3
-    k: 7 
-    expansion_factor: 4 # Expansion factor of the internal MLP in the Transformer layers
-    n_heads: 15  # Number of attention heads
-    masked: True # If mask is used
-    pooling: 'avg' #pooling type, max, avg or sum
-    embed_dim: [256,128,64] # input embedding layers 
-    h_dim: 64 # hidden dim of the scaling matrices
-    U_dim: [512,256,128,64] # Embedding layers of the edge matrix
-    mlp_f_dim: [512,128,64] # layers of the final MLP
-    lr: 0.0001
-    lr_step: 5
-    lr_gamma: 0.9
+    in_channels: 7
+    u_channels: 6
+    num_pnet_layers: 3
+    pnet_embed_dims: [32, 64, 128]
+    knn: [4, 8, 16]
+    num_blocks: 8
+    num_heads:  8
+    lr: 0.0015
+    t_max: 25
+    eta_min: 1e-5
+    batch_size: 128
 
 data:
   class_path: data.data_handling.JetTaggingDataModule
   init_args:
-    data_dir: "/mnt/d/waleed/CP-Higgs/GraphTransformer/GraphTransformer/"
-    file_list: ["train-graph", "test-graph", "test-graph"]
-    batch_size: 256
+    data_dir: "/scratch/tmp/wesmail/Higgs/training/data/"
+    file_list: ["train_graph.h5", "val_graph.h5", "test_graph.h5"]
+    batch_size: 128
     num_workers: 16
+

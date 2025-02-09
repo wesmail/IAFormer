@@ -14,3 +14,4 @@ if __name__ == "__main__":
     # comment if you don't have a GPU with tensor cores
     torch.set_float32_matmul_precision("high")
     cli_main()
+
