@@ -1,10 +1,10 @@
 seed_everything: 42
 trainer:
-  max_epochs: 25
+  max_epochs: 35
   accelerator: "gpu"
-  devices: [0,1,2,3]
-  strategy: "ddp_find_unused_parameters_false"
-  precision: "16-mixed"  # mixed-precision training
+  devices: [0]
+  strategy: "auto"
+  precision: "32-true"  # single-precision training
   accumulate_grad_batches: 2
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
@@ -30,23 +30,24 @@ trainer:
 model:
   class_path: models.models.JetTaggingModule
   init_args:
-    in_channels: 7
+    in_channels: 11
     u_channels: 6
-    num_pnet_layers: 3
-    pnet_embed_dims: [32, 64, 128]
-    knn: [4, 8, 16]
-    num_blocks: 8
-    num_heads:  8
+    embed_dim: 32
+    attn: "diff"
+    max_num_particles: 128
+    num_blocks: 4
+    num_heads:  16
+    num_classes: 1
     lr: 0.0015
-    t_max: 25
-    eta_min: 1e-5
-    batch_size: 128
+    t_max: 35
+    eta_min: 1e-6
+    batch_size: 100
 
 data:
   class_path: data.data_handling.JetTaggingDataModule
   init_args:
-    data_dir: "/scratch/tmp/wesmail/Higgs/training/data/"
-    file_list: ["train_graph.h5", "val_graph.h5", "test_graph.h5"]
-    batch_size: 128
+    data_dir: "/mnt/d/waleed/CP-Higgs/GraphTransformer/GraphTransformer/"
+    file_list: ["test_graph.h5", "test_graph.h5", "test_graph.h5"]
+    batch_size: 100
     num_workers: 16
 

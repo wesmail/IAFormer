@@ -10,48 +10,52 @@ import torch.nn.functional as F
 from lightning.pytorch import LightningModule
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 
-# PyG
-# from torch_geometric.nn import MessagePassing, knn_graph, global_mean_pool
+# Framework imports
+from models.embedding import ParticleEmbedding, InteractionInputEncoding
+from models.attention import ParticleAttentionBlock
 
 # Torch Metrics imports
 from torchmetrics import Accuracy, AUROC
 
-# Framework imports
-from models.particle_net import ParticleNet
-from models.particle_transformer import InteractionInputEncoding, ParticleAttentionBlock
 
-
-class ParticleTransformer(nn.Module):
+class Transformer(nn.Module):
     def __init__(
         self,
         in_channels=7,
         u_channels=6,
-        num_pnet_layers=3,
-        pnet_embed_dims=[32, 64, 128],
-        knn=[4, 8, 16],
-        embed_dim=128,
+        embed_dim=32,
         num_heads=8,
         num_blocks=6,
+        attn="plain",
+        max_num_particles=100,
         num_classes=1,
     ):
-        super(ParticleTransformer, self).__init__()
+        super(Transformer, self).__init__()
+        if attn not in {"plain", "diff", "interaction"}:
+            raise ValueError(
+                f"Invalid attention type: {attn}. Must be 'plain', 'interaction' or 'diff'."
+            )
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
-        self.u_embed_dim = num_heads * 2
-        self.particle_embed = ParticleNet(
-            in_channels=in_channels,
-            num_layers=num_pnet_layers,
-            embed_dims=pnet_embed_dims,
-            k=knn,
+        self.u_embed_dim = 64
+        self.attn = attn
+        self.head_dim = (
+            num_heads
+            if attn in {"plain", "interaction"}
+            else (num_heads * 2 if attn == "diff" else -1)
         )
+        self.particle_embed = ParticleEmbedding(input_dim=in_channels)
         self.interaction_embed = InteractionInputEncoding(
-            input_dim=u_channels, output_dim=self.u_embed_dim
+            input_dim=u_channels,
+            output_dim=self.u_embed_dim,
         )
 
         self.blocks = nn.ModuleList(
             [
                 ParticleAttentionBlock(
                     embed_dim=embed_dim,
+                    u_embed=self.u_embed_dim,
                     num_heads=num_heads,
+                    attn=attn,
                     num_layers=num_blocks,
                     layer_idx=i,
                 )
@@ -59,34 +63,24 @@ class ParticleTransformer(nn.Module):
             ]
         )
 
-        self.mlp_head = nn.Linear(embed_dim, num_classes)
+        self.mlp_head = nn.Linear(max_num_particles, num_classes)
 
-    def forward(self, x, pos, u=None, pmask=None):
-        # particles mask
-        if pmask is not None:
-            pad_mask = (pmask == 1).sum(
-                dim=-1
-            )  # set to -1 (pad_mask = -1) to pool across features
-            x = x[:, : pad_mask.max()]
-            pos = pos[:, : pad_mask.max()]
-            u = self.interaction_embed(u[:, : pad_mask.max(), : pad_mask.max(), :])
-        x = self.particle_embed(x, pos)
+    def forward(self, x, u=None, umask=None):
+        x = self.particle_embed(x)
         # adjcancy matrix mask
-        umask = (
-            (u == 0)[:, : pad_mask.max(), : pad_mask.max(), 0]
-            .bool()
-            .unsqueeze(-1)
-            .repeat(1, 1, 1, self.u_embed_dim)
-        )
+        if u is not None:
+            umask = (u != 0)[..., 0].bool().unsqueeze(-1).repeat(1, 1, 1, self.head_dim)
+            u = self.interaction_embed(u)
 
         for block in self.blocks:
-            x = block(x, u, umask)
+            if self.attn == "plain":
+                x, _ = block(x)
+            elif self.attn in {"interaction", "diff"}:
+                x, _ = block(x, u, umask)
 
         # Aggregate features (e.g., mean pooling)
         # TODO: let user choose pooling function
-        x = x.mean(
-            dim=1
-        )  # Pool across particles (dim=1) features (dim=-1) MUST use pad_mask = -1
+        x = x.mean(dim=-1)  # Pool across particles (dim=1) features (dim=-1)
 
         logits = self.mlp_head(x)
         return logits
@@ -109,11 +103,12 @@ class JetTaggingModule(LightningModule):
         self,
         in_channels: int = 7,
         u_channels: int = 6,
-        num_pnet_layers: int = 3,
-        pnet_embed_dims: list = [32, 64, 128],
-        knn: list = [4, 8, 16],
-        num_blocks: int = 8,
+        embed_dim: int = 32,
         num_heads: int = 8,
+        num_blocks: int = 6,
+        attn: str = "plain",
+        max_num_particles: int = 100,
+        num_classes: int = 1,
         eta_min: float = 1e-5,
         t_max: int = 20,
         lr: float = 0.0001,
@@ -121,22 +116,30 @@ class JetTaggingModule(LightningModule):
     ) -> None:
         super().__init__()
 
+        self.in_channels = in_channels
+        self.u_channels = u_channels
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.num_blocks = num_blocks
+        self.attn = attn
+        self.max_num_particles = max_num_particles
+        self.num_classes = num_classes
+
         self.lr = lr
         self.eta_min = eta_min
         self.t_max = t_max
         self.batch_size = batch_size
         self.save_hyperparameters()
 
-        self.model = ParticleTransformer(
-            in_channels=in_channels,
-            u_channels=u_channels,
-            num_pnet_layers=num_pnet_layers,
-            pnet_embed_dims=pnet_embed_dims,
-            knn=knn,
-            embed_dim=pnet_embed_dims[-1],
-            num_heads=num_heads,
-            num_blocks=num_blocks,
-            num_classes=1,
+        self.model = Transformer(
+            in_channels=self.in_channels,
+            u_channels=self.u_channels,
+            embed_dim=self.embed_dim,
+            num_blocks=self.num_blocks,
+            num_heads=self.num_heads,
+            max_num_particles=self.max_num_particles,
+            attn=self.attn,
+            num_classes=self.num_classes,
         )
 
         # Accuarcy matric
@@ -154,14 +157,12 @@ class JetTaggingModule(LightningModule):
         Returns:
             STEP_OUTPUT: The training loss.
         """
-        x, pos, u, y, pmask = (
+        x, u, y = (
             batch["node_features"],
-            batch["coordinates"],
             batch["edge_features"],
             batch["labels"],
-            batch["node_mask"],
         )
-        model_out = self.model(x, pos, u, pmask).flatten()
+        model_out = self.model(x, u).flatten()
         # calculate the loss
         loss = torch.nn.functional.binary_cross_entropy_with_logits(model_out, y)
         acc = self.accuracy(model_out, y)
@@ -182,14 +183,12 @@ class JetTaggingModule(LightningModule):
         Returns:
             STEP_OUTPUT: The validation loss.
         """
-        x, pos, u, y, pmask = (
+        x, u, y = (
             batch["node_features"],
-            batch["coordinates"],
             batch["edge_features"],
             batch["labels"],
-            batch["node_mask"],
         )
-        model_out = self.model(x, pos, u, pmask).flatten()
+        model_out = self.model(x, u).flatten()
         # calculate the loss
         val_loss = torch.nn.functional.binary_cross_entropy_with_logits(model_out, y)
         val_acc = self.accuracy(model_out, y)
@@ -213,14 +212,12 @@ class JetTaggingModule(LightningModule):
         """
         Perform a single test step.
         """
-        x, pos, u, y, pmask = (
+        x, u, y = (
             batch["node_features"],
-            batch["coordinates"],
             batch["edge_features"],
             batch["labels"],
-            batch["node_mask"],
         )
-        model_out = self.model(x, pos, u, pmask).flatten()
+        model_out = self.model(x, u).flatten()
         # calculate the loss
         test_loss = torch.nn.functional.binary_cross_entropy_with_logits(model_out, y)
         self.log(

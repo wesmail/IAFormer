@@ -40,11 +40,8 @@ class H5Dataset(Dataset):
         self.reconstruct_adjacency(self.adjacancy_matrix[item])
 
         return {
-            "node_features": node_features[..., 4:11],
-            "coordinates": node_features[..., -2:],
-            "node_mask": torch.tensor(self.mask[item], dtype=torch.int16),
+            "node_features": node_features[..., :11],
             "edge_features": torch.tensor(self.adj_matrix, dtype=torch.float32),
-            # "edge_mask": torch.tensor(np.any(self.adj_matrix != 0, axis=2), dtype=torch.int16),
             "labels": torch.tensor(self.labels[item], dtype=torch.float32),
         }
 
@@ -121,7 +118,6 @@ class JetTaggingDataModule(LightningDataModule):
         self,
         data_dir: str,
         file_list: list,
-        max_num_particles: int = 100,
         batch_size: int = 32,
         num_workers: int = 8,
     ) -> None:
@@ -133,7 +129,6 @@ class JetTaggingDataModule(LightningDataModule):
             )
 
         self.train_file, self.val_file, self.test_file = file_list
-        self.max_num_particles = max_num_particles
         self.data_dir = data_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
