@@ -1,4 +1,34 @@
-# Particle Interaction Builder
+# IAFormer: Interaction-Aware Sparse Attention Transformer for Collider Data Analysis
+
+## Required Packages
+To use this package, you need to install the following dependencies:
+
+1. `numpy`
+2. `pandas`
+3. `pytables`
+4. `scikit-learn`
+5. `matplotlib`
+6. `awkward`
+7. `vector`
+8. `uproot`
+9. `h5py`
+10. `pytorch`
+11. `lightning`
+12. `torchmetrics`
+13. `particle`
+
+You can install them using Conda and Pip (You can use `toptagging-setup.sh` as explained below):
+
+```sh
+micromamba install numpy pandas pytables scikit-learn matplotlib seaborn jupyter tqdm awkward vector uproot h5py -c conda-forge -y  
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126 # for gpu and cuda  
+pip install lightning  
+pip install "lightning[pytorch-extra]"  
+python -m pip install particle  
+```
+
+
+## Particle Graph Builder
 
 This Python module processes 4-momenta of jet constituents from HDF5 file to compute particle interactions as a graph. It generates 4-vectors, adjacency matrices, masks, and labels, and saves these processed features into a new HDF5 file. The module handles large datasets by processing and saving data in chunks.
 
@@ -11,12 +41,9 @@ This Python module processes 4-momenta of jet constituents from HDF5 file to com
 
 
 ---
-### 0. Download, Install Mamba, and Install Required Packages 
-Download and install Mambaforge by excuting the `download-mamba.sh` bash script  
-```bash
-chmod +x download-mamba.sh
-./installation.sh
-```
+### 0. Download, Install Micromamba, and Install Required Packages 
+Download and install [Micromamba](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html).
+
 Follow the instructions. Then, install the required packages  
 ```bash
 chmod +x toptagging-setup.sh
@@ -30,36 +57,37 @@ Open Python interpreter
 ipython
 ```
 
-Inside Python interpreter create an instance of the `ParticleGraphBuilder` class by specifying the input HDF5 file and the dataset key.
+Inside Python interpreter create an instance of the `TopParticleGraphBuilder` class for top dataset or `QGParticleGraphBuilder` for quark-gluon dataset.
 
 ```python
-builder = ParticleGraphBuilder("val.h5", key="table")
+from graph_builder import TopParticleGraphBuilder
+builder = TopParticleGraphBuilder(file_path="train.h5", key="table", max_particles=100, chunk_size=1000, max_num_chunks=-1)
 ```
 
-### 2. Load the Data
-Call the `load_data()` method to load the particle data from the HDF5 file. This method initializes the 4-momentum components for each particle.  
+or
 
 ```python
-builder.load_data()
+from graph_builder import QGParticleGraphBuilder
+builder = QGParticleGraphBuilder(file_paths=[f"QG_jets_{i:02d}.npz" for i in range(16)], key="table", max_particles=100, chunk_size=1000, max_num_chunks=-1)
 ```
 
-### 3. Save Processed Data
-Call the `save_to_hdf5()` method to process the data in chunks and save the output to a new HDF5 file.  
+### 2. Generate and save graphs
+Call the `generate_graphs()` method to process the data in chunks and save the output to a new HDF5 file.  
 
 ```python
-builder.save_to_hdf5("graph_val.h5", chunk_size=1000)
+builder.generate_graphs("train_graph.h5", n_jobs=16)
 ```
 
-### 4. Example Code to Read the Output
+### 3. Example Code to Read the Output
 Once the processed data has been saved, you can read and inspect it using the following example:
 
 ```python
 import h5py
 
 # Open the processed HDF5 file
-with h5py.File("graph_val.h5", "r") as f:
-    p4 = f["feature_matrices"][:]
-    adj_matrices = f["adj_matrices"][:]
+with h5py.File("train_graph.h5", "r") as f:
+    p4 = f["feature_matrix"][:]
+    adj_matrices = f["adjacancy_matrix"][:]
     mask = f["mask"][:]
     labels = f["labels"][:]
 
@@ -79,8 +107,8 @@ with h5py.File("graph_val.h5", "r") as f:
 
 The output HDF5 file contains the following datasets:
 
-1. `feature_matrices`: A 3D array of shape `(N_events, max_particles, 4)` where each entry represents the energy and momentum `(E, Px, Py, Pz)` for particles.  
-2. `adj_matrices`: A 4D array of shape `(N_events, max_particles, max_particles, 4)` containing pairwise interaction features `(ΔR, kT, z, m²)`.  
+1. `feature_matrix`: A 3D array of shape `(N_events, max_particles, 4)` where each entry represents the energy and momentum `(E, Px, Py, Pz)` for particles.  
+2. `adjacancy_matrix`: A 4D array of shape `(N_events, max_particles, max_particles, 4)` containing pairwise interaction features `(ΔR, kT, z, m²)`.  
 3. `mask`: A 2D boolean array of shape `(N_events, max_particles)` indicating valid particle entries.  
 4. `labels`: A 1D array of shape `(N_events,)` containing labels for the events.
 
@@ -89,5 +117,5 @@ After creating the graph files in a form of `h5` files for training, validation 
 The first step is to modify the configuration file `configs/config.yaml` according to your needs, e.g., number of epochs, model size, ...  
 Then simply run
 ```python
-ipython main.py -- fit --config=configs/config.yaml
+ipython main.py -- fit --config=configs/ia_former.yaml
 ```

@@ -41,13 +41,13 @@ model:
     lr: 0.0015
     t_max: 35
     eta_min: 1e-6
-    batch_size: 100
+    batch_size: 256
 
 data:
   class_path: data.data_handling.JetTaggingDataModule
   init_args:
-    data_dir: "/mnt/d/waleed/CP-Higgs/GraphTransformer/GraphTransformer/"
-    file_list: ["test_graph.h5", "test_graph.h5", "test_graph.h5"]
-    batch_size: 100
+    data_dir: "/mnt/d/waleed/ia_former/"
+    file_list: ["train_graph.h5", "val_graph.h5", "test_graph.h5"]
+    batch_size: 256
     num_workers: 16
 
