@@ -428,11 +428,71 @@ class QGParticleGraphBuilder:
 
         # Create the 4-momentum array
         energy_padded = ak.fill_none(
-            ak.pad_none(p4_chunk.energy, target=self.max_particles), 0
+            ak.pad_none(p4_chunk.energy, target=self.max_particles, clip=True), 0
         )
-        px_padded = ak.fill_none(ak.pad_none(p4_chunk.px, target=self.max_particles), 0)
-        py_padded = ak.fill_none(ak.pad_none(p4_chunk.py, target=self.max_particles), 0)
-        pz_padded = ak.fill_none(ak.pad_none(p4_chunk.pz, target=self.max_particles), 0)
+        px_padded = ak.fill_none(
+            ak.pad_none(p4_chunk.px, target=self.max_particles, clip=True), 0
+        )
+        py_padded = ak.fill_none(
+            ak.pad_none(p4_chunk.py, target=self.max_particles, clip=True), 0
+        )
+        pz_padded = ak.fill_none(
+            ak.pad_none(p4_chunk.pz, target=self.max_particles, clip=True), 0
+        )
+
+        # Pid information
+        # Compute charge: Assume charge is known for each PID based on standard physics conventions
+        charge = np.where(
+            pids == 22,
+            0,  # Photons = charge 0
+            np.where(
+                np.abs(pids) == 11,
+                -1,  # Electrons = charge -1
+                np.where(
+                    np.abs(pids) == 13,
+                    -1,  # Muons = charge -1
+                    np.where(
+                        np.abs(pids) == 211,
+                        1,  # Charged pions = charge +/-1
+                        np.where(
+                            np.abs(pids) == 321,
+                            1,  # Charged kaons = charge +/-1
+                            np.where(
+                                np.abs(pids) == 2212,
+                                1,  # Protons = charge +1
+                                0,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )  # Everything else neutral
+
+        # Boolean masks
+        Electron = np.abs(pids) == 11
+        Muon = np.abs(pids) == 13
+        Photon = pids == 22
+        CH = (np.abs(pids) == 211) | (np.abs(pids) == 321) | (np.abs(pids) == 2212)
+        NH = (np.abs(pids) == 130) | (np.abs(pids) == 2112) | (pids == 0)
+
+        charge_padded = ak.fill_none(
+            ak.pad_none(charge, target=self.max_particles, clip=True), 0
+        )
+        Electron_padded = ak.fill_none(
+            ak.pad_none(Electron, target=self.max_particles, clip=True), 0
+        )
+        Muon_padded = ak.fill_none(
+            ak.pad_none(Muon, target=self.max_particles, clip=True), 0
+        )
+        Photon_padded = ak.fill_none(
+            ak.pad_none(Photon, target=self.max_particles, clip=True), 0
+        )
+        CH_padded = ak.fill_none(
+            ak.pad_none(CH, target=self.max_particles, clip=True), 0
+        )
+        NH_padded = ak.fill_none(
+            ak.pad_none(NH, target=self.max_particles, clip=True), 0
+        )
 
         # Calculate jet-level properties
         jet_p4 = ak.sum(p4_chunk, axis=1)
@@ -465,24 +525,26 @@ class QGParticleGraphBuilder:
         delta_r = np.hypot(delta_eta, delta_phi)
 
         # Pad kinematic variables
-        log_pt_padded = ak.fill_none(ak.pad_none(log_pt, target=self.max_particles), 0)
+        log_pt_padded = ak.fill_none(
+            ak.pad_none(log_pt, target=self.max_particles, clip=True), 0
+        )
         log_energy_padded = ak.fill_none(
-            ak.pad_none(log_energy, target=self.max_particles), 0
+            ak.pad_none(log_energy, target=self.max_particles, clip=True), 0
         )
         log_pt_rel_padded = ak.fill_none(
-            ak.pad_none(log_pt_rel, target=self.max_particles), 0
+            ak.pad_none(log_pt_rel, target=self.max_particles, clip=True), 0
         )
         log_energy_rel_padded = ak.fill_none(
-            ak.pad_none(log_energy_rel, target=self.max_particles), 0
+            ak.pad_none(log_energy_rel, target=self.max_particles, clip=True), 0
         )
         delta_eta_padded = ak.fill_none(
-            ak.pad_none(delta_eta, target=self.max_particles), 0
+            ak.pad_none(delta_eta, target=self.max_particles, clip=True), 0
         )
         delta_phi_padded = ak.fill_none(
-            ak.pad_none(delta_phi, target=self.max_particles), 0
+            ak.pad_none(delta_phi, target=self.max_particles, clip=True), 0
         )
         delta_r_padded = ak.fill_none(
-            ak.pad_none(delta_r, target=self.max_particles), 0
+            ak.pad_none(delta_r, target=self.max_particles, clip=True), 0
         )
 
         # Stack all features into a single array
@@ -497,6 +559,12 @@ class QGParticleGraphBuilder:
                 ak.to_numpy(log_pt_rel_padded),
                 ak.to_numpy(log_energy_rel_padded),
                 ak.to_numpy(delta_eta_padded),
+                ak.to_numpy(charge_padded),
+                ak.to_numpy(Electron_padded),
+                ak.to_numpy(Muon_padded),
+                ak.to_numpy(Photon_padded),
+                ak.to_numpy(CH_padded),
+                ak.to_numpy(NH_padded),
                 ak.to_numpy(delta_phi_padded),
                 ak.to_numpy(delta_r_padded),
             ],
@@ -538,9 +606,9 @@ class QGParticleGraphBuilder:
         with h5py.File(output_file, "w", libver="latest") as outfile:
             _feature_matrix = outfile.create_dataset(
                 "feature_matrix",
-                shape=(total_rows, self.max_particles, 11),
+                shape=(total_rows, self.max_particles, 17),
                 dtype="float32",
-                chunks=(self.chunk_size, self.max_particles, 11),
+                chunks=(self.chunk_size, self.max_particles, 17),
             )
             _adjacancy_matrix = outfile.create_dataset(
                 "adjacancy_matrix",
