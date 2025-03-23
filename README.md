@@ -92,7 +92,7 @@ with h5py.File("train_graph.h5", "r") as f:
     labels = f["labels"][:]
 
     # Example: Access the first event
-    first_event_p4 = p4[0]
+    first_event_p4 = p4[0][:4]
     first_event_adj = adj_matrices[0]
     first_event_mask = mask[0]
     first_event_label = labels[0]
@@ -107,7 +107,7 @@ with h5py.File("train_graph.h5", "r") as f:
 
 The output HDF5 file contains the following datasets:
 
-1. `feature_matrix`: A 3D array of shape `(N_events, max_particles, 4)` where each entry represents the energy and momentum `(E, Px, Py, Pz)` for particles.  
+1. `feature_matrix`: A 3D array of shape `(N_events, max_particles, features)` where each entry represents the energy and momentum `(E, Px, Py, Pz)` for particles and other features.  
 2. `adjacancy_matrix`: A 4D array of shape `(N_events, max_particles, max_particles, 4)` containing pairwise interaction features `(ΔR, kT, z, m²)`.  
 3. `mask`: A 2D boolean array of shape `(N_events, max_particles)` indicating valid particle entries.  
 4. `labels`: A 1D array of shape `(N_events,)` containing labels for the events.

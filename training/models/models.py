@@ -43,6 +43,7 @@ class Transformer(nn.Module):
             if attn in {"plain", "interaction"}
             else (num_heads * 2 if attn == "diff" else -1)
         )
+        print(f"Head dim is {self.head_dim}\n")
         self.particle_embed = ParticleEmbedding(input_dim=in_channels)
         self.interaction_embed = InteractionInputEncoding(
             input_dim=u_channels,
@@ -71,19 +72,23 @@ class Transformer(nn.Module):
         if u is not None:
             umask = (u != 0)[..., 0].bool().unsqueeze(-1).repeat(1, 1, 1, self.head_dim)
             u = self.interaction_embed(u)
-
+        attn_weights = []
+        activations = []
         for block in self.blocks:
             if self.attn == "plain":
-                x, _ = block(x)
+                x, attn = block(x)
             elif self.attn in {"interaction", "diff"}:
-                x, _ = block(x, u, umask)
+                x, attn = block(x, u)
+            
+            attn_weights.append(attn)
+            activations.append(x.mean(dim=-1)) # output shape [batch size, number of particles]
 
         # Aggregate features (e.g., mean pooling)
         # TODO: let user choose pooling function
         x = x.mean(dim=-1)  # Pool across particles (dim=1) features (dim=-1)
 
         logits = self.mlp_head(x)
-        return logits
+        return logits, torch.stack(attn_weights).transpose(1, 0), torch.stack(activations).transpose(1, 0)
 
 
 class JetTaggingModule(LightningModule):
@@ -146,6 +151,13 @@ class JetTaggingModule(LightningModule):
         self.accuracy = Accuracy(task="binary")
         self.aucroc = AUROC(task="binary")
 
+        # for predictions
+        self.test_predictions = []
+        self.test_targets = []
+        self.attn_weights = []
+        self.activations = []
+        
+
     def training_step(self, batch, batch_idx) -> STEP_OUTPUT:
         """
         Perform a single training step.
@@ -162,7 +174,8 @@ class JetTaggingModule(LightningModule):
             batch["edge_features"],
             batch["labels"],
         )
-        model_out = self.model(x, u).flatten()
+        model_out, _, _ = self.model(x, u)
+        model_out = model_out.flatten()
         # calculate the loss
         loss = torch.nn.functional.binary_cross_entropy_with_logits(model_out, y)
         acc = self.accuracy(model_out, y)
@@ -188,7 +201,8 @@ class JetTaggingModule(LightningModule):
             batch["edge_features"],
             batch["labels"],
         )
-        model_out = self.model(x, u).flatten()
+        model_out, _, _ = self.model(x, u)
+        model_out = model_out.flatten()
         # calculate the loss
         val_loss = torch.nn.functional.binary_cross_entropy_with_logits(model_out, y)
         val_acc = self.accuracy(model_out, y)
@@ -217,7 +231,8 @@ class JetTaggingModule(LightningModule):
             batch["edge_features"],
             batch["labels"],
         )
-        model_out = self.model(x, u).flatten()
+        model_out, attn_weights, activations = self.model(x, u)
+        model_out = model_out.flatten()
         # calculate the loss
         test_loss = torch.nn.functional.binary_cross_entropy_with_logits(model_out, y)
         self.log(
@@ -241,6 +256,12 @@ class JetTaggingModule(LightningModule):
             sync_dist=True,
             batch_size=self.batch_size,
         )
+
+        # for predictions
+        self.test_predictions.extend(model_out.detach().cpu().numpy())
+        self.test_targets.extend(y.cpu().numpy())
+        self.attn_weights.extend(attn_weights.cpu().numpy())
+        self.activations.extend(activations.cpu().numpy())
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         """
