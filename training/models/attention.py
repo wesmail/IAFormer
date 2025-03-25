@@ -156,7 +156,7 @@ class ParticleAttentionBlock(nn.Module):
         super(ParticleAttentionBlock, self).__init__()
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
-        if attn in {"interaction", "diff"}:
+        if attn in {"interaction", "plain"}:
             self.pmha = MultiHeadAttention(
                 embed_dim=embed_dim,
                 num_heads=num_heads,
