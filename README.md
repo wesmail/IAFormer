@@ -119,3 +119,15 @@ Then simply run
 ```python
 ipython main.py -- fit --config=configs/ia_former.yaml
 ```
+Please cite:  
+```
+@article{Esmail:2025kii,
+    author = "Esmail, W. and Hammad, A. and Nojiri, M.",
+    title = "{IAFormer: Interaction-Aware Transformer network for collider data analysis}",
+    eprint = "2505.03258",
+    archivePrefix = "arXiv",
+    primaryClass = "hep-ph",
+    month = "5",
+    year = "2025"
+}
+```
