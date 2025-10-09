@@ -33,7 +33,7 @@ tar -xvf train_part_x.tar
 ## 2. JetClass File Regrouper `regroup_jetclass_by_index.sh`:
 
 This utility script reorganizes JetClass ROOT files into **per-index folders** for easier processing.  
-Each output folder (e.g., `train_00`, `train_01`, …) contains **one file per physics class**, such as `HToBB_00.root`, `ZToQQ_00.root`, etc.
+Each output folder (e.g., `train_00`, `train_01`, …) contains **2 files per physics class**, such as `HToBB_00.root`, `ZToQQ_00.root`, etc.
 
 The aim of this is to create a consistent directory layout before launching graph-building jobs.  
 This ensures that each SLURM job processes exactly one folder → one HDF5 output.
@@ -44,6 +44,15 @@ This ensures that each SLURM job processes exactly one folder → one HDF5 outpu
 chmod +x regroup_jetclass_by_index.sh
 ./regroup_jetclass_by_index.sh
 ```
+
+Since validation dataset is only 5M events, once can create a single graph **HDF5 file** (see next point) for whole validation dataset.  
+For test dataset you can run `organize_test.sh`:  
+
+```bash
+chmod +x organize_test.sh
+./organize_test.sh
+```
+This will create 10 `test_xx` sub-directories, each contains 20 test root files.
 
 ## 3. JetClass Graph Builder `graph_builder.py`:
 
@@ -63,8 +72,28 @@ ipython graph_builder.py -- \
   --max_particles 100
 ```
 
-This will create a single **HDF5 file** containing **1,000,000 events** in total, spanning **10 physics classes**, where each class includes **100,000 events**.  
+This will create a single **HDF5 file** containing **2,000,000 events** in total, spanning **10 physics classes**, where each class includes **100,000 events**.  
 If you have access to a SLURM cluster, you can **automate the conversion of the entire JetClass dataset** (≈100 million events) using the accompanying automation scripts.
+
+The same should be done for validation and test datasets:  
+
+```bash
+ipython graph_builder.py -- \
+  --roots "JetClass_Zenodo/val/*.root" \
+  --out "outputs/val.h5" \
+  --chunk_size 16384 \
+  --compression lzf \
+  --max_particles 100
+```
+
+```bash
+ipython graph_builder.py -- \
+  --roots "JetClass_Zenodo/test_00/*.root" \
+  --out "outputs/test_00.h5" \
+  --chunk_size 16384 \
+  --compression lzf \
+  --max_particles 100
+```
 
 To do this, simply use the two helper scripts:
 - `run_graph_builder.sh` — executes the graph builder for a specific dataset split.

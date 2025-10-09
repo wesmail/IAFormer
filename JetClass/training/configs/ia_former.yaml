@@ -52,16 +52,16 @@ model:
 data:
   class_path: data.data_handling.JetClassLightningDataModule
   init_args:
-    train_files: "/scratch/tmp/wesmail/Higgs/JetClass/hdf5_files/train/*.h5"
-    val_files: "/scratch/tmp/wesmail/Higgs/JetClass/hdf5_files/val/*.h5"
-    test_files: "/scratch/tmp/wesmail/Higgs/JetClass/hdf5_files/test/*.h5"
+    train_files: "/path/to/train/*.h5" # please use glob pattern
+    val_files: "/path/to/val/*.h5" # please use glob pattern
+    test_files: "/path/to/test/*.h5" # please use glob pattern
     batch_size: 256
     
     # OPTIMIZED DATALOADER SETTINGS
-    num_workers: 12  # Reduced from 16 (see explanation below)
+    num_workers: 12  # adjust according to your system
     pin_memory: true
     persistent_workers: true
-    prefetch_factor: 4  # Increased from 2 for better pipelining
+    prefetch_factor: 4
     
     # NEW OPTIMIZATION FLAGS
     cache_adjacency: true  # Enable adjacency matrix caching
