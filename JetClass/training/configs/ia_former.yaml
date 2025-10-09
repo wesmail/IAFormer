@@ -1,0 +1,69 @@
+seed_everything: 42
+trainer:
+  max_epochs: 23
+  accelerator: "gpu"
+  devices: [0]
+  strategy: "auto"
+  precision: "bf16-mixed"
+  accumulate_grad_batches: 2
+  
+  # OPTIMIZATION: Reduce checkpoint overhead
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        save_weights_only: false
+        mode: "min"
+        monitor: "val_loss"
+        every_n_train_steps: 0
+        every_n_epochs: 1
+        train_time_interval: null
+        save_top_k: 3  # Only keep best 3 checkpoints
+        
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: "val_loss"
+        min_delta: 0.0
+        patience: 5
+        verbose: false
+        
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args:
+        save_dir: "."
+        name: "jetclass_checkpoints"
+        flush_secs: 120  # Flush less frequently to reduce I/O
+
+model:
+  class_path: models.models.JetTaggingModule
+  init_args:
+    in_channels: 11
+    u_channels: 6
+    embed_dim: 32
+    attn: "diff"
+    max_num_particles: 100
+    num_blocks: 12
+    num_heads: 16
+    num_classes: 10
+    lr: 1e-3
+    t_max: 23
+    eta_min: 1e-6
+    batch_size: 256
+
+data:
+  class_path: data.data_handling.JetClassLightningDataModule
+  init_args:
+    train_files: "/scratch/tmp/wesmail/Higgs/JetClass/hdf5_files/train/*.h5"
+    val_files: "/scratch/tmp/wesmail/Higgs/JetClass/hdf5_files/val/*.h5"
+    test_files: "/scratch/tmp/wesmail/Higgs/JetClass/hdf5_files/test/*.h5"
+    batch_size: 256
+    
+    # OPTIMIZED DATALOADER SETTINGS
+    num_workers: 12  # Reduced from 16 (see explanation below)
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 4  # Increased from 2 for better pipelining
+    
+    # NEW OPTIMIZATION FLAGS
+    cache_adjacency: true  # Enable adjacency matrix caching
+    cache_size_per_worker: 2000  # Cache 2000 samples per worker
+    reconstruct_full_adjacency: true  # Keep your current setting
