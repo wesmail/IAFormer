@@ -56,6 +56,9 @@ class Transformer(nn.Module):
             for i in range(num_blocks)
         ])
 
+        # A learnable CLS token
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
         # NOTE:
         # You pool with x.mean(dim=-1) -> shape [B, P].
         # So a Linear(P -> num_classes) is appropriate without changing your tensor layout.
@@ -63,6 +66,10 @@ class Transformer(nn.Module):
 
     def forward(self, x, u=None, umask=None):
         x = self.particle_embed(x)  # expect shape [B, P, E] downstream
+        # --- Add CLS token ---
+        B = x.shape[0]
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # shape: [B, 1, d_model]
+        x = torch.cat((cls_tokens, x), dim=1)  # shape: [B, 1 + P, d_model]
 
         if u is not None:
             # adjacency matrix mask (kept same semantics)
@@ -81,8 +88,10 @@ class Transformer(nn.Module):
             # mean over feature dim → [B, P]
             activations.append(x.mean(dim=-1))
 
+        # --- Pool across tokens using mean ---
+        x = x[:, 0]  # Take only the CLS token output
         # Your current pooling: mean over feature dim (last dim) → [B, P]
-        x = x.mean(dim=-1)
+        #x = x.mean(dim=-1)
 
         logits = self.mlp_head(x)  # [B, num_classes]
         # stack lists to tensors for logging/analysis
