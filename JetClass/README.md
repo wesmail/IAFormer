@@ -68,7 +68,7 @@ ipython graph_builder.py -- \
   --roots "JetClass_Zenodo/train_00/*.root" \
   --out "outputs/train_00.h5" \
   --chunk_size 16384 \
-  --compression lzf \
+  --compression "none" \
   --max_particles 100
 ```
 
@@ -82,7 +82,7 @@ ipython graph_builder.py -- \
   --roots "JetClass_Zenodo/val/*.root" \
   --out "outputs/val.h5" \
   --chunk_size 16384 \
-  --compression lzf \
+  --compression "none" \
   --max_particles 100
 ```
 
@@ -91,7 +91,7 @@ ipython graph_builder.py -- \
   --roots "JetClass_Zenodo/test_00/*.root" \
   --out "outputs/test_00.h5" \
   --chunk_size 16384 \
-  --compression lzf \
+  --compression "none" \
   --max_particles 100
 ```
 
