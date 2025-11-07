@@ -25,7 +25,8 @@ class Transformer(nn.Module):
         num_blocks=6,
         attn="plain",
         max_num_particles=100,
-        num_classes=10,              # <-- multiclass
+        num_classes=10,
+        use_flash=True,  # NEW: Pass flash attention flag
     ):
         super().__init__()
         if attn not in {"plain", "diff", "interaction"}:
@@ -52,52 +53,65 @@ class Transformer(nn.Module):
                 attn=attn,
                 num_layers=num_blocks,
                 layer_idx=i,
+                use_flash=use_flash,  # Pass to attention blocks
             )
             for i in range(num_blocks)
         ])
 
-        # A learnable CLS token
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-
-        # NOTE:
-        # You pool with x.mean(dim=-1) -> shape [B, P].
-        # So a Linear(P -> num_classes) is appropriate without changing your tensor layout.
         self.mlp_head = nn.Linear(max_num_particles, num_classes)
 
-    def forward(self, x, u=None, umask=None):
-        x = self.particle_embed(x)  # expect shape [B, P, E] downstream
-        # --- Add CLS token ---
-        B = x.shape[0]
-        cls_tokens = self.cls_token.expand(B, -1, -1)  # shape: [B, 1, d_model]
-        x = torch.cat((cls_tokens, x), dim=1)  # shape: [B, 1 + P, d_model]
+    def forward(self, x, u=None, umask=None, return_attn_activations=False):
+        """
+        Args:
+            return_attn_activations: If True, return attention weights and activations (used for test/eval only)
+        """
+        x = self.particle_embed(x)
 
         if u is not None:
-            # adjacency matrix mask (kept same semantics)
-            umask = (u != 0)[..., 0].bool().unsqueeze(-1).repeat(1, 1, 1, self.head_dim)
+            # OPTIMIZED: Create mask properly
+            # u shape: [B, P, P, F] where F is feature dim
+            u_mask_bool = (u != 0)[..., 0].bool()  # [B, P, P]
+            # Add feature dimension and expand to match head_dim
+            batch_size = u_mask_bool.shape[0]
+            num_particles = u_mask_bool.shape[1]
+            #umask = u_mask_bool.unsqueeze(-1).expand(batch_size, num_particles, num_particles, self.head_dim)
             u = self.interaction_embed(u)
 
-        attn_weights = []
-        activations = []
+        # Only collect attention/activations if needed (for test/eval)
+        if return_attn_activations:
+            attn_weights = []
+            activations = []
+        
+        # Collect beta values for logging (only for diff attention)
+        beta_values = [] if self.attn == "diff" else None
+
         for block in self.blocks:
             if self.attn == "plain":
                 x, attn, _ = block(x)
-            else:  # "interaction" or "diff"
+            else:
                 x, attn, beta = block(x, u)
+                if self.attn == "diff" and beta is not None:
+                    beta_values.append(beta)
 
-            attn_weights.append(attn)
-            # mean over feature dim → [B, P]
-            activations.append(x.mean(dim=-1))
+            if return_attn_activations:
+                attn_weights.append(attn)
+                activations.append(x.mean(dim=-1))
 
-        # --- Pool across tokens using mean ---
-        x = x[:, 0]  # Take only the CLS token output
-        # Your current pooling: mean over feature dim (last dim) → [B, P]
-        #x = x.mean(dim=-1)
-
-        logits = self.mlp_head(x)  # [B, num_classes]
-        # stack lists to tensors for logging/analysis
-        attn_stack = torch.stack(attn_weights).transpose(1, 0)
-        act_stack  = torch.stack(activations).transpose(1, 0)
-        return logits, attn_stack, act_stack
+        x = x.mean(dim=-1)
+        logits = self.mlp_head(x)
+        
+        # Compute mean beta across all blocks for logging
+        mean_beta = None
+        if beta_values:
+            beta_stack = torch.stack(beta_values)
+            mean_beta = beta_stack.mean().item()
+        
+        if return_attn_activations:
+            attn_stack = torch.stack(attn_weights).transpose(1, 0)
+            act_stack  = torch.stack(activations).transpose(1, 0)
+            return logits, attn_stack, act_stack, mean_beta
+        else:
+            return logits, None, None, mean_beta
 
 
 class JetTaggingModule(LightningModule):
@@ -110,16 +124,18 @@ class JetTaggingModule(LightningModule):
         num_blocks: int = 6,
         attn: str = "plain",
         max_num_particles: int = 100,
-        num_classes: int = 10,          # <-- multiclass
+        num_classes: int = 10,
         eta_min: float = 1e-5,
         t_max: int = 20,
         lr: float = 1e-4,
         batch_size: int = 64,
-        label_smoothing: float = 0.0,   # optional
+        label_smoothing: float = 0.0,
+        compile_model: bool = True,  # NEW: torch.compile flag
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
 
+        # Build the model
         self.model = Transformer(
             in_channels=in_channels,
             u_channels=u_channels,
@@ -130,6 +146,10 @@ class JetTaggingModule(LightningModule):
             attn=attn,
             num_classes=num_classes,
         )
+
+        # CRITICAL: Compile AFTER model construction but BEFORE any forward passes
+        # This is done in configure_model() which Lightning calls at the right time
+        self.compile_model = compile_model
 
         # Metrics for multiclass
         self.acc = Accuracy(task="multiclass", num_classes=num_classes)
@@ -148,21 +168,54 @@ class JetTaggingModule(LightningModule):
         self.attn_weights = []
         self.activations = []
 
+    def configure_model(self):
+        """
+        BEST PLACE TO COMPILE: Lightning calls this hook at the right time
+        (after model is moved to device, before training starts)
+        """
+        if self.compile_model and not hasattr(self, '_compiled'):
+            print("Compiling model with torch.compile...")
+            
+            # OPTION 1: Compile the entire model (recommended for most cases)
+            self.model = torch.compile(
+                self.model,
+                mode="reduce-overhead",  # Options: "default", "reduce-overhead", "max-autotune"
+                fullgraph=False,  # Set True only if no dynamic control flow
+            )
+            
+            # OPTION 2: Compile only the forward pass (alternative)
+            # self.model.forward = torch.compile(
+            #     self.model.forward,
+            #     mode="reduce-overhead",
+            #     fullgraph=False,
+            # )
+            
+            self._compiled = True
+            print("✅ Model compilation complete!")
+
     # ---- helpers ----
     def _step(self, batch, prefix: str):
-        x, u, y = batch["node_features"], batch["edge_features"], batch["labels"]  # y: [B] long in [0..9]
-        logits, _, _ = self.model(x, u)  # [B, C]
+        x, u, y = batch["node_features"], batch["edge_features"], batch["labels"]
+        logits, _, _, mean_beta = self.model(x, u, return_attn_activations=False)
         loss = F.cross_entropy(logits, y, label_smoothing=self.label_smoothing)
 
         # Metrics
-        acc = self.acc(logits, y)  # torchmetrics will argmax internally for multiclass
-        # For AUROC-multiclass we need probabilities:
+        acc = self.acc(logits, y)
         probs = logits.softmax(dim=-1)
         auc = self.auroc(probs, y)
 
-        self.log(f"{prefix}/loss", loss, prog_bar=True, sync_dist=True, batch_size=self.batch_size)
-        self.log(f"{prefix}/acc",  acc,  prog_bar=True, sync_dist=True, batch_size=self.batch_size)
-        self.log(f"{prefix}/auc",  auc,  prog_bar=True, sync_dist=True, batch_size=self.batch_size)
+        # Optimize logging: sync_dist only when needed
+        sync_dist = self.trainer.num_devices > 1 if self.trainer else False
+
+        # Reduce logging overhead
+        self.log(f"{prefix}_loss", loss, prog_bar=True, sync_dist=sync_dist, batch_size=self.batch_size)
+        self.log(f"{prefix}_acc",  acc,  prog_bar=False, sync_dist=sync_dist, batch_size=self.batch_size, on_step=False, on_epoch=True)
+        self.log(f"{prefix}_auc",  auc,  prog_bar=False, sync_dist=sync_dist, batch_size=self.batch_size, on_step=False, on_epoch=True)
+
+        # Log beta value if available (for diff attention)
+        if mean_beta is not None:
+            self.log(f"{prefix}_beta", mean_beta, prog_bar=False, sync_dist=sync_dist, batch_size=self.batch_size, on_step=False, on_epoch=True)
+
         return loss, logits
 
     # ---- Lightning hooks ----
@@ -176,22 +229,29 @@ class JetTaggingModule(LightningModule):
 
     def test_step(self, batch, batch_idx) -> STEP_OUTPUT:
         x, u, y = batch["node_features"], batch["edge_features"], batch["labels"]
-        logits, attn_weights, activations = self.model(x, u)
+        # For test, we need attention weights and activations
+        logits, attn_weights, activations, mean_beta = self.model(x, u, return_attn_activations=True)
         loss = F.cross_entropy(logits, y, label_smoothing=self.label_smoothing)
 
         probs = logits.softmax(dim=-1)
-        self.log("test/loss", loss, prog_bar=True, sync_dist=True, batch_size=self.batch_size)
-        self.log("test/acc",  self.acc(logits, y), prog_bar=True, sync_dist=True, batch_size=self.batch_size)
-        self.log("test/auc",  self.auroc(probs, y), prog_bar=True, sync_dist=True, batch_size=self.batch_size)
+        sync_dist = self.trainer.num_devices > 1 if self.trainer else False
+        self.log("test_loss", loss, prog_bar=True, sync_dist=sync_dist, batch_size=self.batch_size)
+        self.log("test_acc",  self.acc(logits, y), prog_bar=True, sync_dist=sync_dist, batch_size=self.batch_size)
+        self.log("test_auc",  self.auroc(probs, y), prog_bar=True, sync_dist=sync_dist, batch_size=self.batch_size)
+
+        # Log beta value if available
+        if mean_beta is not None:
+            self.log("test_beta", mean_beta, prog_bar=False, sync_dist=sync_dist, batch_size=self.batch_size)
 
         # stash (optional)
         self.test_predictions.extend(probs.detach().cpu().numpy())
         self.test_targets.extend(y.cpu().numpy())
-        self.attn_weights.extend(attn_weights.detach().cpu().numpy())
-        self.activations.extend(activations.detach().cpu().numpy())
+        if attn_weights is not None:
+            self.attn_weights.extend(attn_weights.detach().cpu().numpy())
+        if activations is not None:
+            self.activations.extend(activations.detach().cpu().numpy())
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-2)
         sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.t_max, eta_min=self.eta_min)
         return {"optimizer": opt, "lr_scheduler": sch}
-

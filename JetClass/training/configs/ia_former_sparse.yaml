@@ -45,18 +45,17 @@ trainer:
     - class_path: lightning.pytorch.loggers.WandbLogger
       init_args:
         project: "jetclass"
-        name: "ia_former_optimized"
+        name: "ia_former_sparse_optimized"
         save_dir: "."
         log_model: false
 
 model:
-  class_path: models.models.JetTaggingModule
+  class_path: models.models_sparse.HybridJetTaggingModule
   init_args:
     in_channels: 11
     u_channels: 6
     embed_dim: 64
     attn: "diff"
-    max_num_particles: 100
     num_blocks: 16
     num_heads: 16
     num_classes: 10
@@ -65,17 +64,19 @@ model:
     eta_min: 1e-4
     batch_size: 256
     compile_model: false
+    sparse: true  # Use sparse PyG representation
 
 data:
-  class_path: data.data_handling.JetClassLightningDataModule
+  class_path: data.data_handling_sparse.JetClassLightningDataModule
   init_args:
     train_files: "/mnt/d/waleed/CP-Higgs/JetClass/train_00.h5"
     val_files: "/mnt/d/waleed/CP-Higgs/JetClass/train_00.h5"
     test_files: "/mnt/d/waleed/CP-Higgs/JetClass/train_00.h5"
     batch_size: 256
-    
-    # OPTIMIZED DATALOADER SETTINGS
-    num_workers: 12  # Adjusted (rule of thumb: 2-4 per GPU)
+    num_workers: 12
     pin_memory: true
     persistent_workers: true
-    prefetch_factor: 4  # Increased for better CPU-GPU pipelining
+    prefetch_factor: 4
+    filter_zero_edges: true
+    dataset_class: "spase"   # or "dense"
+

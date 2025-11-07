@@ -10,9 +10,9 @@ class ParticleEmbedding(nn.Module):
             nn.GELU(),
             nn.Linear(256, 128),
             nn.GELU(),
-            nn.Linear(128, 32),
+            nn.Linear(128, 64),
             nn.GELU(),
-            nn.RMSNorm(32),
+            nn.RMSNorm(64),
         )
 
     def forward(self, x):

@@ -13,6 +13,8 @@ eval "$(micromamba shell hook --shell bash)"
 # Activate the environment
 micromamba activate pytorch
 
+export WANDB_API_KEY=3913cd20743af13af360d6c7a4a8f02236a6af35
+
 # Check if it's a file
 if [ -f "$CONFIG_PATH" ]; then
   echo "Running training with config: $CONFIG_PATH"
