@@ -44,6 +44,9 @@ class JetClassDenseDataset(Dataset):
         edge_features = torch.as_tensor(self.edge[item], dtype=torch.float32)
         n_particles = int(self.n_particles[item])
 
+        # CRITICAL FIX: Trim node features to actual number of particles
+        node_features = node_features[:n_particles]
+
         # Generate all possible upper triangular indices
         i, j = torch.triu_indices(n_particles, n_particles, offset=1)
         
@@ -69,6 +72,14 @@ class JetClassDenseDataset(Dataset):
             edge_mask = (edge_attr.abs().sum(dim=1) > 1e-6)
             edge_index = edge_index[:, edge_mask]
             edge_attr = edge_attr[edge_mask]
+        
+        # CRITICAL VALIDATION: Ensure all edge indices are valid
+        max_idx = edge_index.max().item() if edge_index.numel() > 0 else -1
+        if max_idx >= n_particles:
+            raise ValueError(
+                f"Invalid edge index {max_idx} for graph with {n_particles} nodes. "
+                f"Edge index range: [{edge_index.min().item()}, {max_idx}]"
+            )
         
         label = torch.tensor(int(self.y[item]), dtype=torch.long)
         data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr, y=label)
@@ -107,6 +118,9 @@ class JetClassSparseDataset(Dataset):
         edge_features = torch.as_tensor(self.edge[item], dtype=torch.float32)
         n_particles = int(self.n_particles[item])
 
+        # CRITICAL FIX: Trim node features to actual number of particles
+        node_features = node_features[:n_particles]
+
         # Calculate expected number of edges for upper triangle
         num_expected_edges = n_particles * (n_particles - 1) // 2
         
@@ -133,9 +147,20 @@ class JetClassSparseDataset(Dataset):
             edge_index = edge_index[:, valid_edges]
             edge_attr = edge_attr[valid_edges]
         
+        # CRITICAL VALIDATION: Ensure all edge indices are valid
+        if edge_index.numel() > 0:
+            max_idx = edge_index.max().item()
+            min_idx = edge_index.min().item()
+            if max_idx >= n_particles or min_idx < 0:
+                raise ValueError(
+                    f"Invalid edge indices for graph with {n_particles} nodes. "
+                    f"Edge index range: [{min_idx}, {max_idx}]. "
+                    f"Valid range should be [0, {n_particles-1}]"
+                )
+        
         label = torch.tensor(int(self.y[item]), dtype=torch.long)
         data = Data(
-            x=node_features[:n_particles],  # Trim to actual particles
+            x=node_features,  # Already trimmed to actual particles
             edge_index=edge_index,
             edge_attr=edge_attr,
             y=label
