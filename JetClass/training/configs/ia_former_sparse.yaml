@@ -1,27 +1,31 @@
 seed_everything: 42
+
 trainer:
   max_epochs: 20
   accelerator: "gpu"
   devices: -1
-  strategy: "auto"  # Changed: removed find_unused_parameters (5-10% speedup)
-  precision: "bf16-mixed"
+  strategy: "auto"
+  precision: "32-true"
+  
+  # Gradient accumulation
   accumulate_grad_batches: 2
   
-  # Gradient clipping for stability
-  gradient_clip_val: 1.0
-  gradient_clip_algorithm: "norm"
+  # Gradient clipping
+  #gradient_clip_val: 1.0
+  #gradient_clip_algorithm: "norm"
   
-  # Disable validation sanity check (saves time at start)
+  # Validation settings
   num_sanity_val_steps: 0
   
-  # Optimized logging
-  log_every_n_steps: 50
+  # Logging - reduced frequency
+  log_every_n_steps: 100
   
-  # Enable benchmarking for consistent input sizes
-  benchmark: true  # 5-15% speedup for fixed input sizes
+  # Benchmarking
+  benchmark: true
   
-  # Limit val batches for faster validation (optional)
-  # limit_val_batches: 0.5  # Use only 50% of val set
+  # 🔥 NEW: Force garbage collection more frequently
+  # This helps with graph memory fragmentation
+  limit_train_batches: 1.0  # Can set to 0.1 for quick debugging
   
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
@@ -40,17 +44,20 @@ trainer:
         min_delta: 0.0
         patience: 5
         verbose: false
+    
+    # 🔥 NEW: Add memory monitoring callback
+    - class_path: lightning.pytorch.callbacks.DeviceStatsMonitor
         
   logger:
     - class_path: lightning.pytorch.loggers.WandbLogger
       init_args:
         project: "jetclass"
-        name: "ia_former_sparse_optimized"
+        name: "ia_former_sparse"
         save_dir: "."
         log_model: false
 
 model:
-  class_path: models.models_sparse.HybridJetTaggingModule
+  class_path: models.models_sparse.JetTaggingModule
   init_args:
     in_channels: 11
     u_channels: 6
@@ -62,21 +69,168 @@ model:
     lr: 1e-3
     t_max: 5
     eta_min: 1e-4
-    batch_size: 256
+    batch_size: 128
     compile_model: false
-    sparse: true  # Use sparse PyG representation
 
 data:
   class_path: data.data_handling_sparse.JetClassLightningDataModule
   init_args:
-    train_files: "/mnt/d/waleed/CP-Higgs/JetClass/train_00.h5"
-    val_files: "/mnt/d/waleed/CP-Higgs/JetClass/train_00.h5"
-    test_files: "/mnt/d/waleed/CP-Higgs/JetClass/train_00.h5"
-    batch_size: 256
-    num_workers: 12
+    train_files: 
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_000.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_001.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_002.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_003.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_004.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_005.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_006.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_007.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_008.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_009.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_010.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_011.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_012.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_013.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_014.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_015.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_016.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_017.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_018.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_019.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_020.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_021.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_022.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_023.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_024.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_025.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_026.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_027.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_028.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_029.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_030.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_031.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_032.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_033.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_034.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_035.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_036.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_037.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_038.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_039.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_040.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_041.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_042.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_043.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_044.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_045.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_046.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_047.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_048.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_049.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_050.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_051.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_052.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_053.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_054.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_055.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_056.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_057.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_058.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_059.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_060.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_061.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_062.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_063.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_064.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_065.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_066.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_067.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_068.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_069.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_070.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_071.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_072.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_073.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_074.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_075.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_076.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_077.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_078.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_079.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_080.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_081.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_082.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_083.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_084.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_085.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_086.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_087.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_088.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_089.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_090.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_091.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_092.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_093.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_094.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_095.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_096.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_097.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_098.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_train/train_part_099.h5"
+    val_files: 
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_000.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_001.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_002.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_003.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_004.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_005.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_006.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_007.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_008.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_009.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_010.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_011.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_012.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_013.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_014.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_015.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_016.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_017.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_018.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_019.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_020.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_021.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_022.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_023.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_024.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_025.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_026.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_027.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_028.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_029.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_030.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_031.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_032.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_033.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_034.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_035.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_036.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_037.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_038.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_039.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_040.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_041.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_042.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_043.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_044.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_045.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_046.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_047.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_048.h5"
+    - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_049.h5"
+
+    # 🔥 OPTIMIZED: Reduced workers and prefetch to limit open file handles
+    batch_size: 128
+    num_workers: 4  # Reduced from 8 (4 workers * ~30 files each = ~120 max handles)
     pin_memory: true
     persistent_workers: true
-    prefetch_factor: 4
-    filter_zero_edges: true
-    dataset_class: "spase"   # or "dense"
-
+    prefetch_factor: 2

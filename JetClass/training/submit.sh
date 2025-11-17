@@ -3,9 +3,9 @@
 #SBATCH --output=%x_%A_%a.out           # Standard output log for each array job
 #SBATCH --error=%x_%A_%a.err            # Error log for each array job
 #SBATCH --ntasks=1                      # Number of tasks (usually 1 for single-core jobs)
-#SBATCH --cpus-per-task=12              # Number of CPU cores per task
+#SBATCH --cpus-per-task=16              # Number of CPU cores per task
 #SBATCH --mem=32G                       # Memory allocation
-#SBATCH --time=16:00:00                 # Time limit hrs:min:sec
+#SBATCH --time=24:00:00                 # Time limit hrs:min:sec
 #SBATCH --gres=gpu:2			# Number of GPUs
 #SBATCH --partition=gpu4090             # Partition name
 
