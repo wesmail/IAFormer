@@ -11,7 +11,7 @@ trainer:
   accumulate_grad_batches: 2
   
   # Gradient clipping
-  #gradient_clip_val: 1.0
+  gradient_clip_val: 1.0
   #gradient_clip_algorithm: "norm"
   
   # Validation settings
@@ -23,7 +23,6 @@ trainer:
   # Benchmarking
   benchmark: true
   
-  # 🔥 NEW: Force garbage collection more frequently
   # This helps with graph memory fragmentation
   limit_train_batches: 1.0  # Can set to 0.1 for quick debugging
   
@@ -55,6 +54,7 @@ trainer:
         name: "ia_former_sparse"
         save_dir: "."
         log_model: false
+        offline: false
 
 model:
   class_path: models.models_sparse.JetTaggingModule
@@ -69,7 +69,7 @@ model:
     lr: 1e-3
     t_max: 5
     eta_min: 1e-4
-    batch_size: 128
+    batch_size: 256
     compile_model: false
 
 data:
@@ -229,8 +229,8 @@ data:
     - "/scratch/tmp/wesmail/Higgs/JetClass/h5_val/val_part_049.h5"
 
     # 🔥 OPTIMIZED: Reduced workers and prefetch to limit open file handles
-    batch_size: 128
-    num_workers: 4  # Reduced from 8 (4 workers * ~30 files each = ~120 max handles)
+    batch_size: 256
+    num_workers: 8  # Reduced from 8 (4 workers * ~30 files each = ~120 max handles)
     pin_memory: true
     persistent_workers: true
     prefetch_factor: 2

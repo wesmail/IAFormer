@@ -1,5 +1,7 @@
 import torch
+import math
 import h5py
+from collections import OrderedDict
 from typing import Optional, List, Tuple, Union
 from pathlib import Path
 import numpy as np
@@ -8,14 +10,15 @@ from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 from functools import lru_cache
 
-
 class JetClassOptimizedDataset(Dataset):
     """
-    Optimized dataset that:
-    1. Opens ONE file at a time per worker (closes after reading)
+    Optimized dataset with LRU file handle caching for handling many files efficiently.
+    
+    Key optimizations:
+    1. LRU cache for file handles (keeps N most recent files open)
     2. Caches edge index generation (triu_indices)
     3. Minimizes memory allocations
-    4. No file handle accumulation
+    4. Handles 100+ files without "too many open files" errors
     """
 
     def __init__(
@@ -23,10 +26,15 @@ class JetClassOptimizedDataset(Dataset):
         h5_paths: List[str],
         cache_file_sizes: bool = True,
         max_cache_size: int = 256,  # Cache edge indices for common sizes
+        max_open_files: int = 15,   # Max files to keep open per worker
     ):
         super().__init__()
         self.h5_paths = sorted(h5_paths)
         self.max_cache_size = max_cache_size
+        self.max_open_files = max_open_files
+        
+        # LRU cache for file handles (per worker)
+        self._file_handles = OrderedDict()
         
         # Pre-compute cumulative indices
         self._setup_file_boundaries(cache_file_sizes)
@@ -85,10 +93,38 @@ class JetClassOptimizedDataset(Dataset):
         local_idx = global_idx - self.cumulative_sizes[file_idx]
         return file_idx, local_idx
 
+    def _get_file_handle(self, file_idx: int):
+        """
+        Get file handle with LRU caching.
+        Keeps max_open_files most recently used files open.
+        """
+        # If already open, move to end (mark as recently used)
+        if file_idx in self._file_handles:
+            self._file_handles.move_to_end(file_idx)
+            return self._file_handles[file_idx]
+        
+        # Open new file
+        h5_file = h5py.File(
+            self.h5_paths[file_idx],
+            "r",
+            rdcc_nbytes=1024**2 * 128,  # 128MB chunk cache per file
+            rdcc_nslots=10000,
+        )
+        self._file_handles[file_idx] = h5_file
+        
+        # Evict oldest file if over limit
+        if len(self._file_handles) > self.max_open_files:
+            oldest_idx, oldest_file = self._file_handles.popitem(last=False)
+            try:
+                oldest_file.close()
+            except Exception as e:
+                print(f"Warning: Error closing file {oldest_idx}: {e}")
+        
+        return h5_file
+
     @staticmethod
     def infer_num_particles_from_pairs(pairs: int) -> int:
         """Infer number of particles from number of pairs."""
-        import math
         discriminant = 1 + 8 * pairs
         n = int((-1 + math.sqrt(discriminant)) / 2)
         return n + 1
@@ -118,27 +154,27 @@ class JetClassOptimizedDataset(Dataset):
     def __getitem__(self, global_idx: int) -> Data:
         """
         Load sample with optimizations:
-        - Open file, read, close immediately
+        - Use LRU-cached file handles (keeps files open intelligently)
         - Use cached edge indices
         - Minimal allocations
         """
         # Find which file
         file_idx, local_idx = self._find_file_and_local_idx(global_idx)
 
-        # 🔥 KEY CHANGE: Open file, read, close immediately
-        # This prevents file handle accumulation!
-        with h5py.File(self.h5_paths[file_idx], "r", rdcc_nbytes=1024**2*100) as h5_file:
-            # Load raw data
-            node_features = torch.as_tensor(
-                h5_file["node_features"][local_idx],
-                dtype=torch.float32,
-            )
-            edge_features = torch.as_tensor(
-                h5_file["adjacency_matrix"][local_idx],
-                dtype=torch.float32,
-            )
-            n_particles_raw = int(h5_file["n_particles"][local_idx])
-            label = torch.tensor(int(h5_file["labels"][local_idx]), dtype=torch.long)
+        # Get file handle from LRU cache (reuses if recently accessed)
+        h5_file = self._get_file_handle(file_idx)
+        
+        # Load raw data
+        node_features = torch.as_tensor(
+            h5_file["node_features"][local_idx],
+            dtype=torch.float32,
+        )
+        edge_features = torch.as_tensor(
+            h5_file["adjacency_matrix"][local_idx],
+            dtype=torch.float32,
+        )
+        n_particles_raw = int(h5_file["n_particles"][local_idx])
+        label = torch.tensor(int(h5_file["labels"][local_idx]), dtype=torch.long)
 
         # Infer n_nodes
         max_pairs = edge_features.shape[0]
@@ -157,7 +193,7 @@ class JetClassOptimizedDataset(Dataset):
         # Trim nodes
         node_features = node_features[:n_nodes]
 
-        # 🔥 OPTIMIZED: Use cached edge indices
+        # Use cached edge indices
         num_expected_edges = n_nodes * (n_nodes - 1) // 2
         edge_index_upper = self._get_edge_index_upper(n_nodes)
         edge_attr_upper = edge_features[:num_expected_edges]
@@ -172,6 +208,15 @@ class JetClassOptimizedDataset(Dataset):
             edge_attr=edge_attr,
             y=label,
         )
+
+    def __del__(self):
+        """Cleanup: close all open file handles."""
+        for h5_file in self._file_handles.values():
+            try:
+                h5_file.close()
+            except:
+                pass
+        self._file_handles.clear()
 
 
 class JetClassLightningDataModule(LightningDataModule):

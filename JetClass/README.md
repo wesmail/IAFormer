@@ -106,3 +106,26 @@ Then launch the array job:
 ```bash
 sbatch --array=0-99 submit_array_jobs.slurm
 ```
+
+---
+## Update on Graph Builder  
+For 10 classes run (validation case)  
+```bash
+ipython graph_builder_parallel_optimized.py -- \
+	--class_files HToBB /scratch/tmp/wesmail/Higgs/JetClass/JetClass_Zenodo/val/HToBB_*.root \
+   	--class_files HToCC /scratch/tmp/wesmail/Higgs/JetClass/JetClass_Zenodo/val/HToCC_*.root \
+   	--class_files HToGG /scratch/tmp/wesmail/Higgs/JetClass/JetClass_Zenodo/val/HToGG_*.root \
+    	--class_files HToWW2Q1L /scratch/tmp/wesmail/Higgs/JetClass/JetClass_Zenodo/val/HToWW2Q1L_*.root \
+     	--class_files HToWW4Q /scratch/tmp/wesmail/Higgs/JetClass/JetClass_Zenodo/val/HToWW4Q_*.root \
+    	--class_files TTBarLep /scratch/tmp/wesmail/Higgs/JetClass/JetClass_Zenodo/val/TTBarLep_*.root \
+    	--class_files TTBar /scratch/tmp/wesmail/Higgs/JetClass/JetClass_Zenodo/val/TTBar_*.root \
+    	--class_files WToQQ /scratch/tmp/wesmail/Higgs/JetClass/JetClass_Zenodo/val/WToQQ_*.root \
+    	--class_files ZJetsToNuNu /scratch/tmp/wesmail/Higgs/JetClass/JetClass_Zenodo/val/ZJetsToNuNu_*.root \
+    	--class_files ZToQQ /scratch/tmp/wesmail/Higgs/JetClass/JetClass_Zenodo/val/ZToQQ_*.root \
+    	--out_dir /scratch/tmp/wesmail/Higgs/JetClass/h5_val/  \
+     	--out_prefix val \
+    	--target_events 10000 \
+    	--compression none \
+	--chunk_size 16384 \
+	--n_workers 24
+```

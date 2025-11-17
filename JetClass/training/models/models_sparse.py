@@ -11,19 +11,11 @@ from lightning.pytorch.utilities.types import STEP_OUTPUT
 from torchmetrics import Accuracy, AUROC
 
 # PyG imports
-from torch_geometric.nn import global_mean_pool
+from torch_geometric.nn import global_mean_pool, MessagePassing
+from torch_geometric.utils import softmax
 
 # Generic imports
 import math
-
-# Torch imports
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-# PyG imports (for sparse attention)
-from torch_geometric.nn import MessagePassing
-from torch_geometric.utils import softmax
 
 # Flash Attention import (not actually used for diff attention, but kept for API compatibility)
 try:
@@ -36,6 +28,7 @@ except ImportError:
 
 def lambda_init_fn(depth: int) -> float:
     return 1 - math.exp(-1 / depth)
+
 
 class ParticleEmbedding(nn.Module):
     def __init__(self, input_dim=11):
@@ -53,12 +46,13 @@ class ParticleEmbedding(nn.Module):
     def forward(self, x):
         return self.mlp(x)
 
+
 # ---------------------------------------------------------------------------
-# Edge interaction encoding (sparse analogue of your InteractionInputEncoding)
+# Edge interaction encoding (sparse analogue of InteractionInputEncoding)
 # ---------------------------------------------------------------------------
 class EdgeInteractionEncoding(nn.Module):
     """
-    MLP-based encoder for edge features, analogous to your Conv2d-based
+    MLP-based encoder for edge features, analogous to Conv2d-based
     InteractionInputEncoding for dense interaction matrices.
 
     Input:
@@ -89,13 +83,13 @@ class MultiHeadDiffAttention(MessagePassing):
     """
     PyG-native differential multi-head attention on sparse graphs.
 
-    This is the sparse analogue of your dense MultiHeadDiffAttention that used
+    This is the sparse analogue of dense MultiHeadDiffAttention that used
     Conv2d over a dense interaction matrix u[b, :, i, j].
 
     Here we operate on:
         x:          [N, embed_dim]         (node features)
         edge_index: [2, E]                 (source -> target)
-        u:          [E, u_embed]           (encoded edge features, e.g. via EdgeInteractionEncoding)
+        u:          [E, u_embed]           (encoded edge features)
 
     Internals:
         - v = W_v x           -> [N, H, 2*Dh]
@@ -111,7 +105,7 @@ class MultiHeadDiffAttention(MessagePassing):
         u_embed: int,
         num_heads: int = 1,
         num_layers: int = 1,  # for lambda_init
-        layer_idx: int = 1,   # kept for API symmetry, not used explicitly
+        layer_idx: int = 1,   # kept for API symmetry
         dropout: float = 0.0,
         use_flash: bool = True,  # kept for API compatibility (not used)
     ):
@@ -128,17 +122,16 @@ class MultiHeadDiffAttention(MessagePassing):
 
         # 2 attention maps per head → half the per-head dim for each
         self.head_dim = embed_dim // num_heads // 2
-        self.scaling = self.head_dim ** -0.5  # kept for possible Q/K extensions
+        self.scaling = self.head_dim ** -0.5
 
         # Project node features
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
 
         # Project encoded edge features into 2*num_heads attention scores per edge
-        # (two maps per head)
         self.u_proj = nn.Linear(u_embed, 2 * num_heads, bias=False)
 
-        # Lambda / beta parameters (same logic as your dense implementation)
+        # Lambda / beta parameters
         self.lambda_init = lambda_init_fn(self.depth)
         self.lambda_q1 = nn.Parameter(torch.zeros(100).normal_(mean=0, std=0.1))
         self.lambda_k1 = nn.Parameter(torch.zeros(100).normal_(mean=0, std=0.1))
@@ -150,7 +143,7 @@ class MultiHeadDiffAttention(MessagePassing):
         x: torch.Tensor,          # [N, embed_dim]
         edge_index: torch.Tensor, # [2, E]
         u: torch.Tensor,          # [E, u_embed]  (encoded edge features)
-        umask: torch.Tensor = None,  # kept for API compatibility, unused in sparse setting
+        umask: torch.Tensor = None,  # kept for API compatibility
     ):
         N, d_model = x.size()
         assert d_model == self.embed_dim, "x.size(1) must equal embed_dim"
@@ -160,27 +153,23 @@ class MultiHeadDiffAttention(MessagePassing):
         v = v.view(N, self.num_heads, 2 * self.head_dim)  # [N, H, 2*Dh]
 
         # Project edge features to two attention maps per head
-        # scores: [E, 2H] -> [E, H, 2]
         scores = self.u_proj(u)           # [E, 2*H]
         scores = scores.view(-1, self.num_heads, 2)  # [E, H, 2]
 
-        # Compute β (global scalar as in your dense version)
-        lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float())
-        beta = (lambda_1 * self.lambda_init)
-        beta = torch.sigmoid(beta)  # scalar in (0,1)
+        # 🔥 OPTIMIZATION: Compute β without gradients when possible
+        with torch.no_grad():
+            lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float())
+            beta = torch.sigmoid(lambda_1 * self.lambda_init)  # scalar in (0,1)
+        
+        # Convert to tensor on correct device for differentiation if needed
         beta = beta.to(x.device)
+        if self.training:
+            # Re-enable gradients for training
+            beta = beta.detach().requires_grad_(True)
 
         # Normalize attention scores per target node (edge_index[1])
-        # Map 1
-        alpha1 = softmax(
-            scores[..., 0],        # [E, H]
-            edge_index[1],         # normalize per dst node
-        )
-        # Map 2
-        alpha2 = softmax(
-            scores[..., 1],        # [E, H]
-            edge_index[1],
-        )
+        alpha1 = softmax(scores[..., 0], edge_index[1])  # [E, H]
+        alpha2 = softmax(scores[..., 1], edge_index[1])  # [E, H]
 
         # Differential attention α = α1 - β α2
         alpha = alpha1 - beta * alpha2  # [E, H]
@@ -189,7 +178,6 @@ class MultiHeadDiffAttention(MessagePassing):
         alpha = self.dropout(alpha)
 
         # MessagePassing: propagate v from source to target with weights alpha
-        # We pass v as x to MessagePassing so we can access v_j at edges
         out = self.propagate(
             edge_index,
             x=v,         # v: [N, H, 2*Dh]
@@ -201,7 +189,6 @@ class MultiHeadDiffAttention(MessagePassing):
         out = self.out_proj(out)
 
         # For logging, return alpha and beta
-        # alpha: [E, H], beta: scalar tensor
         return out, alpha, beta
 
     def message(self, x_j: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
@@ -213,7 +200,7 @@ class MultiHeadDiffAttention(MessagePassing):
 
 
 # ---------------------------------------------------------------------------
-# ParticleAttentionBlock (now supports sparse diff attention via edge_index/edge_attr)
+# ParticleAttentionBlock (sparse diff attention via edge_index/edge_attr)
 # ---------------------------------------------------------------------------
 class ParticleAttentionBlock(nn.Module):
     def __init__(
@@ -222,21 +209,12 @@ class ParticleAttentionBlock(nn.Module):
         u_embed: int,
         expansion_factor: float = 4.0,
         num_heads: int = 1,
-        attn: str = "plain",      # "plain", "interaction", or "diff"
+        attn: str = "plain",
         num_layers: int = 1,
         layer_idx: int = 1,
         use_flash: bool = True,
-        edge_in_dim: int = None,  # NEW: raw edge_attr dim (required for attn="diff")
+        edge_in_dim: int = None,  # raw edge_attr dim (required for attn="diff")
     ):
-        """
-        For dense 'plain' / 'interaction' attention:
-            - We assume your existing MultiHeadAttention works on dense u matrices.
-
-        For sparse 'diff' attention (PyG Data-style):
-            - edge_in_dim: input dimension of edge_attr
-            - u_embed: encoded edge dimension (output of EdgeInteractionEncoding)
-
-        """
         super(ParticleAttentionBlock, self).__init__()
         self.attn_type = attn
         self.embed_dim = embed_dim
@@ -244,9 +222,7 @@ class ParticleAttentionBlock(nn.Module):
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
 
-        # -----------------------------
         # Attention module selection
-        # -----------------------------
         if attn in {"interaction", "plain"}:
             raise NotImplementedError("Dense attention is not implemented for sparse mode.")
 
@@ -257,7 +233,7 @@ class ParticleAttentionBlock(nn.Module):
                     "edge_in_dim must be provided for 'diff' attention to encode edge_attr."
                 )
 
-            # Edge encoder: analogous to your InteractionInputEncoding, but for edge_attr
+            # Edge encoder
             self.edge_encoder = EdgeInteractionEncoding(
                 input_dim=edge_in_dim,
                 output_dim=u_embed,
@@ -276,9 +252,7 @@ class ParticleAttentionBlock(nn.Module):
                 f"Invalid attention type: {attn}. Must be 'plain', 'interaction' or 'diff'."
             )
 
-        # -----------------------------
         # MLP block
-        # -----------------------------
         self.mlp = nn.Sequential(
             nn.RMSNorm(embed_dim),
             nn.Linear(embed_dim, int(expansion_factor * embed_dim)),
@@ -294,25 +268,6 @@ class ParticleAttentionBlock(nn.Module):
         edge_index: torch.Tensor = None,
         edge_attr: torch.Tensor = None,
     ):
-        """
-        Args:
-            x:          node features
-                - dense case: [B, P, embed_dim]
-                - sparse case: [N, embed_dim] (PyG Batch)
-
-            For dense "plain"/"interaction":
-                u:      dense interaction tensor (e.g. [B, u_embed, P, P])
-                umask:  optional mask
-
-            For sparse "diff":
-                edge_index: [2, E]
-                edge_attr:  [E, edge_in_dim]
-
-        Returns:
-            out:          updated node features
-            attn_weights: attention weights (format depends on attention type)
-            beta:         scalar (for diff attention), else None
-        """
         x_res = x
         x = self.norm1(x)
 
@@ -321,17 +276,15 @@ class ParticleAttentionBlock(nn.Module):
                 raise ValueError(
                     "For 'diff' attention, edge_index and edge_attr must be provided."
                 )
-            if self.edge_encoder is None:
-                raise RuntimeError("edge_encoder is not initialized for 'diff' attention.")
 
-            # Encode edge_attr once per block (sparse analogue of InteractionInputEncoding)
+            # Encode edge_attr once per block
             u_encoded = self.edge_encoder(edge_attr)  # [E, u_embed]
 
             attn_output, attn_weights, beta = self.pmha(
                 x, edge_index, u_encoded, umask=None
             )
         else:
-            # Dense attention path (unchanged; uses dense u)
+            # Dense attention path
             attn_output, attn_weights, beta = self.pmha(x, u, umask)
 
         x = self.norm2(attn_output)
@@ -348,7 +301,7 @@ class Transformer(nn.Module):
         embed_dim: int = 32,
         num_heads: int = 8,
         num_blocks: int = 6,
-        attn: str = "diff",        # "plain", "diff", "interaction"
+        attn: str = "diff",
         num_classes: int = 10,
         use_flash: bool = True,
     ):
@@ -360,20 +313,14 @@ class Transformer(nn.Module):
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
 
         self.attn = attn
-        self.u_embed_dim = 64  # encoded edge dim (for diff / interaction if needed)
+        self.u_embed_dim = 64  # encoded edge dim
 
         # Node embedding
         self.particle_embed = ParticleEmbedding(input_dim=in_channels)
 
-        # For sparse "diff" attention, InteractionInputEncoding is replaced by
-        # an edge MLP inside ParticleAttentionBlock (EdgeInteractionEncoding).
-        # For dense "plain"/"interaction", your existing ParticleAttentionBlock
-        # still expects u_embed, but we won't use edges here unless you extend it.
-
         self.blocks = nn.ModuleList()
         for i in range(num_blocks):
             if attn == "diff":
-                # Sparse differential attention: we must pass edge_in_dim=u_channels
                 block = ParticleAttentionBlock(
                     embed_dim=embed_dim,
                     u_embed=self.u_embed_dim,
@@ -382,10 +329,9 @@ class Transformer(nn.Module):
                     num_layers=num_blocks,
                     layer_idx=i,
                     use_flash=use_flash,
-                    edge_in_dim=u_channels,  # <- raw edge_attr dim
+                    edge_in_dim=u_channels,
                 )
             else:
-                # "plain" or "interaction" (dense-style, no sparse edges used yet)
                 block = ParticleAttentionBlock(
                     embed_dim=embed_dim,
                     u_embed=self.u_embed_dim,
@@ -394,11 +340,10 @@ class Transformer(nn.Module):
                     num_layers=num_blocks,
                     layer_idx=i,
                     use_flash=use_flash,
-                    # edge_in_dim not needed in dense mode
                 )
             self.blocks.append(block)
 
-        # Graph-level head: pool to [B, embed_dim] then linear
+        # Graph-level head
         self.mlp_head = nn.Linear(embed_dim, num_classes)
 
     def forward(self, data, return_attn_activations: bool = False):
@@ -412,68 +357,61 @@ class Transformer(nn.Module):
                 - data.y          [B] (labels)
             return_attn_activations: if True, return attention weights & activations.
         """
-        x = data.x                      # [N, in_channels]
+        x = data.x
         edge_index = getattr(data, "edge_index", None)
         edge_attr = getattr(data, "edge_attr", None)
         batch_idx = getattr(data, "batch", None)
 
         if batch_idx is None:
-            # single graph case: all nodes belong to graph 0
             batch_idx = x.new_zeros(x.size(0), dtype=torch.long)
 
         # 1) Node embedding
-        x = self.particle_embed(x)      # [N, embed_dim]
+        x = self.particle_embed(x)  # [N, embed_dim]
 
-        # For collecting attention / activations
+        # 🔥 OPTIMIZATION: Don't collect attention/activations unless requested
         attn_weights_all = [] if return_attn_activations else None
         activations_all = [] if return_attn_activations else None
-
-        # Collect beta values for logging (only for diff attention)
         beta_values = [] if self.attn == "diff" else None
 
         # 2) Stack attention blocks
         for block in self.blocks:
             if self.attn == "diff":
-                # Sparse diff attention: use edge_index & edge_attr
                 x, attn, beta = block(
                     x=x,
                     edge_index=edge_index,
                     edge_attr=edge_attr,
                 )
+                # 🔥 FIX: Only collect beta if needed, and detach immediately
                 if beta_values is not None and beta is not None:
-                    beta_values.append(
-                        beta if torch.is_tensor(beta) else torch.tensor(beta, device=x.device)
-                    )
+                    beta_val = beta.detach() if torch.is_tensor(beta) else beta
+                    beta_values.append(beta_val)
+                    
             elif self.attn == "plain":
-                # Plain self-attention: ignore edges (node-only)
                 x, attn, _ = block(x)
-            else:  # "interaction" placeholder (dense interaction not wired to sparse yet)
-                # You can later build a dense u from edge_index/edge_attr and pass it here.
+            else:
                 raise NotImplementedError(
                     "attn='interaction' with sparse edges is not implemented yet."
                 )
 
+            # 🔥 FIX: Detach immediately when collecting
             if return_attn_activations:
-                attn_weights_all.append(attn)
-                # e.g., mean over feature dim per node as a cheap "activation"
-                activations_all.append(x.mean(dim=-1))  # [N]
+                attn_weights_all.append(attn.detach() if torch.is_tensor(attn) else attn)
+                activations_all.append(x.detach().mean(dim=-1))  # [N]
 
         # 3) Graph pooling + classification head
-        # x: [N, embed_dim] -> [B, embed_dim]
-        x_graph = global_mean_pool(x, batch_idx)  # mean over nodes per graph
+        x_graph = global_mean_pool(x, batch_idx)  # [B, embed_dim]
         logits = self.mlp_head(x_graph)           # [B, num_classes]
 
         # 4) Mean beta (for diff attention logging)
         mean_beta = None
         if beta_values:
-            beta_stack = torch.stack(beta_values)  # [num_blocks]
-            mean_beta = beta_stack.mean().item()
+            # 🔥 FIX: Stack detached values
+            beta_stack = torch.stack(beta_values)
+            mean_beta = beta_stack.mean().item()  # Convert to Python scalar
 
         if return_attn_activations:
-            # Note: for diff attention, attn is [E, H]; stacking => [L, E, H]
-            # Transpose to [Batches?] if you later want a different layout.
-            attn_stack = torch.stack(attn_weights_all)  # [L, ...]
-            act_stack = torch.stack(activations_all)    # [L, N]
+            attn_stack = torch.stack(attn_weights_all) if attn_weights_all else None
+            act_stack = torch.stack(activations_all) if activations_all else None
             return logits, attn_stack, act_stack, mean_beta
         else:
             return logits, None, None, mean_beta
@@ -483,23 +421,23 @@ class JetTaggingModule(LightningModule):
     def __init__(
         self,
         in_channels: int = 7,
-        u_channels: int = 6,     # edge_attr dim
+        u_channels: int = 6,
         embed_dim: int = 32,
         num_heads: int = 8,
         num_blocks: int = 6,
-        attn: str = "diff",      # use "diff" to exploit sparsity
+        attn: str = "diff",
         num_classes: int = 10,
         eta_min: float = 1e-5,
         t_max: int = 20,
         lr: float = 1e-4,
         batch_size: int = 64,
         label_smoothing: float = 0.0,
-        compile_model: bool = True,
+        compile_model: bool = False,  # 🔥 CHANGED: Disable by default
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
 
-        # Build the model (sparse / dense depending on attn)
+        # Build the model
         self.model = Transformer(
             in_channels=in_channels,
             u_channels=u_channels,
@@ -510,12 +448,15 @@ class JetTaggingModule(LightningModule):
             num_classes=num_classes,
         )
 
-        # torch.compile flag
         self.compile_model = compile_model
 
         # Metrics for multiclass
-        self.acc = Accuracy(task="multiclass", num_classes=num_classes)
-        self.auroc = AUROC(task="multiclass", num_classes=num_classes, average="macro")
+        self.train_acc = Accuracy(task="multiclass", num_classes=num_classes)
+        self.train_auroc = AUROC(task="multiclass", num_classes=num_classes, average="macro")
+        self.val_acc = Accuracy(task="multiclass", num_classes=num_classes)
+        self.val_auroc = AUROC(task="multiclass", num_classes=num_classes, average="macro")
+        self.test_acc = Accuracy(task="multiclass", num_classes=num_classes)
+        self.test_auroc = AUROC(task="multiclass", num_classes=num_classes, average="macro")
 
         self.lr = lr
         self.eta_min = eta_min
@@ -524,162 +465,142 @@ class JetTaggingModule(LightningModule):
         self.num_classes = num_classes
         self.label_smoothing = label_smoothing
 
-        # for predictions (optional)
+        # 🔥 FIX: Only store predictions during explicit test phase
         self.test_predictions = []
         self.test_targets = []
-        self.attn_weights = []
-        self.activations = []
 
-    #def configure_model(self):
-        """
-        Lightning calls this hook at the right time
-        (after model is moved to device, before training starts).
-        """
-    #    if self.compile_model and not hasattr(self, "_compiled"):
-    #        print("Compiling model with torch.compile...")
-    #        self.model = torch.compile(
-    #            self.model,
-    #            mode="reduce-overhead",
-    #            fullgraph=False,
-    #        )
-    #        self._compiled = True
-    #        print("✅ Model compilation complete!")
-
-    # ---- helpers ----
     def _step(self, batch, prefix: str):
         """
-        Args:
-            batch: PyG Batch object from DataLoader
+        Optimized step with proper memory management.
         """
-        # Extract labels from PyG batch
-        y = batch.y  # (batch_size,)
+        y = batch.y
         
         # Forward pass
         logits, _, _, mean_beta = self.model(batch, return_attn_activations=False)
         loss = F.cross_entropy(logits, y, label_smoothing=self.label_smoothing)
 
-        # Metrics - detach to prevent memory leaks
+        # 🔥 FIX: Use separate metrics per phase to avoid reset issues
+        if prefix == "train":
+            acc_metric = self.train_acc
+            auroc_metric = self.train_auroc
+        elif prefix == "val":
+            acc_metric = self.val_acc
+            auroc_metric = self.val_auroc
+        else:  # test
+            acc_metric = self.test_acc
+            auroc_metric = self.test_auroc
+
+        # 🔥 FIX: Compute metrics in no_grad and detach everything
         with torch.no_grad():
-            acc = self.acc(logits.detach(), y)
-            probs = logits.detach().softmax(dim=-1)
-            auc = self.auroc(probs, y)
+            logits_detached = logits.detach()
+            acc = acc_metric(logits_detached, y)
+            probs = F.softmax(logits_detached, dim=-1)
+            auc = auroc_metric(probs, y)
 
-        # Optimize logging: sync_dist only when needed
         sync_dist = self.trainer.num_devices > 1 if self.trainer else False
-
-        # Get actual batch size from PyG batch
         actual_batch_size = y.size(0)
-
-        # CRITICAL FIX: Detach all logged values and reduce on_step logging
-        # Only log loss on_step for training monitoring
         is_train = prefix == "train"
-        
+
+        # 🔥 FIX: Log only scalars
         self.log(
-            f"{prefix}_loss", 
-            loss.detach(),  # ✅ DETACH to prevent memory leak
-            prog_bar=True, 
-            sync_dist=sync_dist, 
+            f"{prefix}_loss",
+            loss.detach(),
+            prog_bar=True,
+            sync_dist=sync_dist,
             batch_size=actual_batch_size,
             on_step=is_train,  # Only log steps during training
             on_epoch=True
         )
         self.log(
-            f"{prefix}_acc", 
-            acc.detach(),  # ✅ DETACH to prevent memory leak
-            prog_bar=True, 
-            sync_dist=sync_dist, 
-            batch_size=actual_batch_size, 
-            on_step=False,  # ✅ DISABLED on_step to reduce overhead
+            f"{prefix}_acc",
+            acc,
+            prog_bar=True,
+            sync_dist=sync_dist,
+            batch_size=actual_batch_size,
+            on_step=False,
             on_epoch=True
         )
         self.log(
-            f"{prefix}_auc", 
-            auc.detach(),  # ✅ DETACH to prevent memory leak
-            prog_bar=False,  # Less critical, don't show in progress bar
-            sync_dist=sync_dist, 
-            batch_size=actual_batch_size, 
-            on_step=False,  # ✅ DISABLED on_step to reduce overhead
+            f"{prefix}_auc",
+            auc,
+            prog_bar=False,
+            sync_dist=sync_dist,
+            batch_size=actual_batch_size,
+            on_step=False,
             on_epoch=True
         )
 
-        # Log beta value if available (for diff attention)
         if mean_beta is not None:
             self.log(
-                f"{prefix}_beta", 
-                mean_beta.detach() if isinstance(mean_beta, torch.Tensor) else mean_beta,  # ✅ DETACH
-                prog_bar=False, 
-                sync_dist=sync_dist, 
-                batch_size=actual_batch_size, 
-                on_step=False,  # ✅ DISABLED on_step
+                f"{prefix}_beta",
+                mean_beta,  # Already a Python scalar
+                prog_bar=False,
+                sync_dist=sync_dist,
+                batch_size=actual_batch_size,
+                on_step=False,
                 on_epoch=True
             )
 
-        return loss, logits
-    
-    # ---- Lightning hooks ----
+        return loss
+
     def training_step(self, batch, batch_idx) -> STEP_OUTPUT:
-        loss, _ = self._step(batch, "train")
+        loss = self._step(batch, "train")
         return loss
 
     def validation_step(self, batch, batch_idx) -> STEP_OUTPUT:
-        loss, _ = self._step(batch, "val")
+        loss = self._step(batch, "val")
         return loss
 
     def test_step(self, batch, batch_idx) -> STEP_OUTPUT:
-        # For test, we can optionally collect attention/activations
-        logits, attn_weights, activations, mean_beta = self.model(
-            batch, return_attn_activations=True
-        )
-        y = batch.y
-        loss = F.cross_entropy(logits, y, label_smoothing=self.label_smoothing)
+        """
+        🔥 FIX: Minimal test step without attention collection.
+        """
+        with torch.no_grad():
+            # Don't collect attention weights - too memory intensive
+            logits, _, _, mean_beta = self.model(batch, return_attn_activations=False)
+            y = batch.y
+            
+            loss = F.cross_entropy(logits, y, label_smoothing=self.label_smoothing)
+            
+            logits_detached = logits.detach()
+            probs = F.softmax(logits_detached, dim=-1)
+            
+            acc = self.test_acc(logits_detached, y)
+            auc = self.test_auroc(probs, y)
 
-        probs = logits.softmax(dim=-1)
         sync_dist = self.trainer.num_devices > 1 if self.trainer else False
 
-        self.log(
-            "test_loss",
-            loss,
-            prog_bar=True,
-            sync_dist=sync_dist,
-            batch_size=self.batch_size,
-        )
-        self.log(
-            "test_acc",
-            self.acc(logits, y),
-            prog_bar=False,
-            sync_dist=sync_dist,
-            batch_size=self.batch_size,
-            on_step=False,
-            on_epoch=True,
-        )
-        self.log(
-            "test_auc",
-            self.auroc(probs, y),
-            prog_bar=False,
-            sync_dist=sync_dist,
-            batch_size=self.batch_size,
-            on_step=False,
-            on_epoch=True,
-        )
+        self.log("test_loss", loss, prog_bar=True, sync_dist=sync_dist, batch_size=self.batch_size)
+        self.log("test_acc", acc, prog_bar=True, sync_dist=sync_dist, batch_size=self.batch_size, on_epoch=True)
+        self.log("test_auc", auc, prog_bar=False, sync_dist=sync_dist, batch_size=self.batch_size, on_epoch=True)
 
         if mean_beta is not None:
-            self.log(
-                "test_beta",
-                mean_beta,
-                prog_bar=False,
-                sync_dist=sync_dist,
-                batch_size=self.batch_size,
-                on_step=False,
-                on_epoch=True,
-            )
+            self.log("test_beta", mean_beta, prog_bar=False, sync_dist=sync_dist, batch_size=self.batch_size, on_epoch=True)
 
-        # stash (optional)
-        self.test_predictions.extend(probs.detach().cpu().numpy())
-        self.test_targets.extend(y.cpu().numpy())
-        if attn_weights is not None:
-            self.attn_weights.extend(attn_weights.detach().cpu().numpy())
-        if activations is not None:
-            self.activations.extend(activations.detach().cpu().numpy())
+        # 🔥 FIX: Only store limited predictions
+        if len(self.test_predictions) < 10000:  # Limit to prevent memory overflow
+            self.test_predictions.append(probs.cpu().numpy())
+            self.test_targets.append(y.cpu().numpy())
+
+        return loss
+
+    def on_train_epoch_end(self):
+        """🔥 FIX: Reset training metrics."""
+        self.train_acc.reset()
+        self.train_auroc.reset()
+
+    def on_validation_epoch_end(self):
+        """🔥 FIX: Reset validation metrics."""
+        self.val_acc.reset()
+        self.val_auroc.reset()
+
+    def on_test_epoch_end(self):
+        """🔥 FIX: Clear accumulated predictions and reset metrics."""
+        # Clear to free memory
+        self.test_predictions.clear()
+        self.test_targets.clear()
+        self.test_acc.reset()
+        self.test_auroc.reset()
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-2)
@@ -690,4 +611,3 @@ class JetTaggingModule(LightningModule):
             "optimizer": opt,
             "lr_scheduler": sch,
         }
-
