@@ -1,7 +1,5 @@
 import torch
-import math
 import h5py
-from collections import OrderedDict
 from typing import Optional, List, Tuple, Union
 from pathlib import Path
 import numpy as np
@@ -9,6 +7,13 @@ from lightning.pytorch import LightningDataModule
 from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 from functools import lru_cache
+
+
+from collections import OrderedDict
+import math
+import atexit
+import weakref
+
 
 class JetClassOptimizedDataset(Dataset):
     """
@@ -19,14 +24,18 @@ class JetClassOptimizedDataset(Dataset):
     2. Caches edge index generation (triu_indices)
     3. Minimizes memory allocations
     4. Handles 100+ files without "too many open files" errors
+    5. Proper cleanup to prevent file handle leaks
     """
+
+    # 🔥 NEW: Class-level registry for cleanup
+    _instances = []
 
     def __init__(
         self,
         h5_paths: List[str],
         cache_file_sizes: bool = True,
-        max_cache_size: int = 256,  # Cache edge indices for common sizes
-        max_open_files: int = 15,   # Max files to keep open per worker
+        max_cache_size: int = 256,
+        max_open_files: int = 15,
     ):
         super().__init__()
         self.h5_paths = sorted(h5_paths)
@@ -41,6 +50,15 @@ class JetClassOptimizedDataset(Dataset):
         
         # Cache for edge indices (per n_nodes)
         self._edge_index_cache = {}
+        
+        # 🔥 NEW: Track if we've been cleaned up
+        self._closed = False
+        
+        # 🔥 NEW: Register this instance for cleanup
+        JetClassOptimizedDataset._instances.append(weakref.ref(self))
+        
+        # 🔥 NEW: Register cleanup on exit
+        atexit.register(self._cleanup_files)
 
     def _setup_file_boundaries(self, cache_file_sizes: bool):
         """Pre-compute file boundaries."""
@@ -209,22 +227,46 @@ class JetClassOptimizedDataset(Dataset):
             y=label,
         )
 
+    def _cleanup_files(self):
+        """🔥 NEW: Properly close all file handles."""
+        if self._closed:
+            return
+            
+        num_closed = 0
+        for file_idx, h5_file in list(self._file_handles.items()):
+            try:
+                if h5_file and h5_file.id.valid:  # Check if file is still open
+                    h5_file.close()
+                    num_closed += 1
+            except Exception as e:
+                pass  # Silently ignore errors during cleanup
+        
+        self._file_handles.clear()
+        self._closed = True
+        
+        if num_closed > 0:
+            print(f"🧹 Closed {num_closed} file handles in dataset cleanup")
+
     def __del__(self):
         """Cleanup: close all open file handles."""
-        for h5_file in self._file_handles.values():
-            try:
-                h5_file.close()
-            except:
-                pass
-        self._file_handles.clear()
+        self._cleanup_files()
 
+    @classmethod
+    def cleanup_all(cls):
+        """🔥 NEW: Class method to cleanup all dataset instances."""
+        cleaned = 0
+        for ref in cls._instances:
+            instance = ref()
+            if instance is not None:
+                instance._cleanup_files()
+                cleaned += 1
+        cls._instances.clear()
+        if cleaned > 0:
+            print(f"🧹 Cleaned up {cleaned} dataset instances")
 
 class JetClassLightningDataModule(LightningDataModule):
     """
-    Optimized Lightning DataModule with:
-    - One file at a time access
-    - Aggressive file handle management
-    - Memory-efficient settings
+    Optimized Lightning DataModule with proper cleanup.
     """
 
     def __init__(
@@ -232,10 +274,10 @@ class JetClassLightningDataModule(LightningDataModule):
         train_files: Union[List[str], str],
         val_files: Union[List[str], str],
         test_files: Optional[Union[List[str], str]] = None,
-        batch_size: int = 256,
-        num_workers: int = 4,  # Reduced default
+        batch_size: int = 512,
+        num_workers: int = 8,
         pin_memory: bool = True,
-        persistent_workers: bool = False,  # 🔥 CHANGED: Disable to allow worker cleanup
+        persistent_workers: bool = True,
         prefetch_factor: int = 2,
     ):
         super().__init__()
@@ -270,7 +312,7 @@ class JetClassLightningDataModule(LightningDataModule):
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
             prefetch_factor=self.prefetch_factor,
-            drop_last=True,  # Helps with consistency
+            drop_last=True,
         )
 
     def val_dataloader(self):
@@ -294,3 +336,16 @@ class JetClassLightningDataModule(LightningDataModule):
             persistent_workers=self.persistent_workers,
             prefetch_factor=self.prefetch_factor,
         )
+    
+    def teardown(self, stage: Optional[str] = None):
+        """🔥 NEW: Cleanup datasets when done."""
+        print("🧹 Cleaning up datasets...")
+        if hasattr(self, 'train_dataset'):
+            self.train_dataset._cleanup_files()
+        if hasattr(self, 'val_dataset'):
+            self.val_dataset._cleanup_files()
+        if hasattr(self, 'test_dataset'):
+            self.test_dataset._cleanup_files()
+        
+        # Also cleanup any orphaned instances
+        JetClassOptimizedDataset.cleanup_all()
